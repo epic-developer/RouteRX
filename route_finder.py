@@ -5,9 +5,21 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+
+try:
+    import googlemaps
+except Exception:
+    googlemaps = None
+
+try:
+    from flask import Flask, jsonify, request
+except Exception:
+    Flask = None
+    jsonify = None
+    request = None
 
 try:
     import osmnx as ox
@@ -20,6 +32,14 @@ except Exception:
     folium = None
 
 LatLon = Tuple[float, float]  # (lat, lon)
+
+
+@dataclass(frozen=True)
+class GoogleMapsOptions:
+    mode: str = "driving"
+    units: str = "metric"
+    avoid_tolls: bool = False
+    avoid_highways: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,6 +82,105 @@ def haversine_km(a: LatLon, b: LatLon) -> float:
     dl = math.radians(lon2 - lon1)
     x = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
     return 2 * r * math.asin(min(1.0, math.sqrt(x)))
+
+
+class DistanceProvider:
+    def distance_km(self, a: LatLon, b: LatLon) -> float:
+        raise NotImplementedError
+
+    def distances_km(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
+        return [self.distance_km(origin, dest) for dest in destinations]
+
+
+class HaversineDistanceProvider(DistanceProvider):
+    def distance_km(self, a: LatLon, b: LatLon) -> float:
+        return haversine_km(a, b)
+
+
+class GoogleMapsDistanceProvider(DistanceProvider):
+    def __init__(self, api_key: str, options: Optional[GoogleMapsOptions] = None, max_destinations: int = 25):
+        if googlemaps is None:
+            raise RuntimeError("googlemaps is not installed. Install with: pip install googlemaps")
+        if not api_key:
+            raise ValueError("googlemaps API key is required.")
+        self.client = googlemaps.Client(key=api_key)
+        self.options = options or GoogleMapsOptions()
+        self.max_destinations = max_destinations
+        self._cache: Dict[Tuple[float, float, float, float, str, bool, bool], float] = {}
+
+    def distance_km(self, a: LatLon, b: LatLon) -> float:
+        key = self._cache_key(a, b)
+        if key in self._cache:
+            return self._cache[key]
+
+        distances = self.distances_km(a, [b])
+        return distances[0]
+
+    def distances_km(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
+        if not destinations:
+            return []
+
+        results: List[float] = []
+        for i in range(0, len(destinations), self.max_destinations):
+            chunk = destinations[i:i + self.max_destinations]
+            results.extend(self._fetch_chunk(origin, chunk))
+        return results
+
+    def _fetch_chunk(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
+        try:
+            response = self.client.distance_matrix(
+                origins=[self._format_latlon(origin)],
+                destinations=[self._format_latlon(d) for d in destinations],
+                mode=self.options.mode,
+                units=self.options.units,
+                avoid=self._avoid_list() or None,
+            )
+            rows = response.get("rows", [])
+            elements = rows[0].get("elements", []) if rows else []
+        except Exception:
+            elements = []
+
+        results: List[float] = []
+        for dest, element in zip(destinations, elements):
+            km = self._element_distance_km(origin, dest, element)
+            results.append(km)
+
+        if len(results) < len(destinations):
+            for dest in destinations[len(results):]:
+                results.append(haversine_km(origin, dest))
+        return results
+
+    def _element_distance_km(self, origin: LatLon, dest: LatLon, element: dict) -> float:
+        if element.get("status") == "OK":
+            distance = element.get("distance", {})
+            if "value" in distance:
+                km = float(distance["value"]) / 1000.0
+                self._cache[self._cache_key(origin, dest)] = km
+                return km
+        return haversine_km(origin, dest)
+
+    def _cache_key(self, a: LatLon, b: LatLon) -> Tuple[float, float, float, float, str, bool, bool]:
+        return (
+            round(a[0], 6),
+            round(a[1], 6),
+            round(b[0], 6),
+            round(b[1], 6),
+            self.options.mode,
+            self.options.avoid_tolls,
+            self.options.avoid_highways,
+        )
+
+    @staticmethod
+    def _format_latlon(point: LatLon) -> str:
+        return f"{point[0]},{point[1]}"
+
+    def _avoid_list(self) -> List[str]:
+        avoid: List[str] = []
+        if self.options.avoid_tolls:
+            avoid.append("tolls")
+        if self.options.avoid_highways:
+            avoid.append("highways")
+        return avoid
 
 
 def centroid_fallback(county_name: str, state_name: str) -> Optional[LatLon]:
@@ -183,29 +302,31 @@ def representative_point(pts: List[LatLon]) -> Optional[LatLon]:
 # Routing heuristics
 # ---------------------------
 
-def nearest_neighbor_route(points: List[LatLon], start_idx: int) -> List[int]:
+def nearest_neighbor_route(points: List[LatLon], start_idx: int, distance_provider: DistanceProvider) -> List[int]:
     n = len(points)
     unvisited = set(range(n))
     route = [start_idx]
     unvisited.remove(start_idx)
     cur = start_idx
     while unvisited:
-        nxt = min(unvisited, key=lambda j: haversine_km(points[cur], points[j]))
+        unvisited_list = list(unvisited)
+        dists = distance_provider.distances_km(points[cur], [points[j] for j in unvisited_list])
+        nxt = min(zip(unvisited_list, dists), key=lambda pair: pair[1])[0]
         route.append(nxt)
         unvisited.remove(nxt)
         cur = nxt
     return route
 
 
-def route_length_km(points: List[LatLon], route: List[int]) -> float:
+def route_length_km(points: List[LatLon], route: List[int], distance_provider: DistanceProvider) -> float:
     if len(route) <= 1:
         return 0.0
-    return sum(haversine_km(points[route[i]], points[route[i + 1]]) for i in range(len(route) - 1))
+    return sum(distance_provider.distance_km(points[route[i]], points[route[i + 1]]) for i in range(len(route) - 1))
 
 
-def two_opt(points: List[LatLon], route: List[int], max_iters: int = 500) -> List[int]:
+def two_opt(points: List[LatLon], route: List[int], distance_provider: DistanceProvider, max_iters: int = 500) -> List[int]:
     best = route[:]
-    best_len = route_length_km(points, best)
+    best_len = route_length_km(points, best, distance_provider)
     n = len(best)
     improved = True
     iters = 0
@@ -215,7 +336,7 @@ def two_opt(points: List[LatLon], route: List[int], max_iters: int = 500) -> Lis
         for i in range(1, n - 2):
             for k in range(i + 1, n - 1):
                 new = best[:i] + list(reversed(best[i:k + 1])) + best[k + 1:]
-                new_len = route_length_km(points, new)
+                new_len = route_length_km(points, new, distance_provider)
                 if new_len + 1e-9 < best_len:
                     best, best_len = new, new_len
                     improved = True
@@ -225,7 +346,12 @@ def two_opt(points: List[LatLon], route: List[int], max_iters: int = 500) -> Lis
     return best
 
 
-def choose_parking_for_route(nodes: List[CountyNode], route: List[int], reps: List[LatLon]) -> List[LatLon]:
+def choose_parking_for_route(
+    nodes: List[CountyNode],
+    route: List[int],
+    reps: List[LatLon],
+    distance_provider: DistanceProvider,
+) -> List[LatLon]:
     chosen: List[LatLon] = []
     for pos, idx in enumerate(route):
         node = nodes[idx]
@@ -240,14 +366,17 @@ def choose_parking_for_route(nodes: List[CountyNode], route: List[int], reps: Li
 
         if pos == 0:
             nxt_pt = reps[route[1]]
-            best = min(pts, key=lambda p: haversine_km(p, nxt_pt))
+            best = min(pts, key=lambda p: distance_provider.distance_km(p, nxt_pt))
         elif pos == len(route) - 1:
             prev_pt = reps[route[-2]]
-            best = min(pts, key=lambda p: haversine_km(prev_pt, p))
+            best = min(pts, key=lambda p: distance_provider.distance_km(prev_pt, p))
         else:
             prev_pt = reps[route[pos - 1]]
             nxt_pt = reps[route[pos + 1]]
-            best = min(pts, key=lambda p: haversine_km(prev_pt, p) + haversine_km(p, nxt_pt))
+            best = min(
+                pts,
+                key=lambda p: distance_provider.distance_km(prev_pt, p) + distance_provider.distance_km(p, nxt_pt),
+            )
         chosen.append(best)
     return chosen
 
@@ -325,9 +454,19 @@ def build_nodes(
     return nodes
 
 
-def find_route(nodes: List[CountyNode], num_places: int, start_county: Optional[str], improve_2opt: bool) -> pd.DataFrame:
+def find_route(
+    nodes: List[CountyNode],
+    num_places: int,
+    start_county: Optional[str],
+    improve_2opt: bool,
+    distance_provider: Optional[DistanceProvider] = None,
+    parking_distance_provider: Optional[DistanceProvider] = None,
+) -> pd.DataFrame:
     if num_places <= 0:
         raise ValueError("num_places must be >= 1")
+
+    distance_provider = distance_provider or HaversineDistanceProvider()
+    parking_distance_provider = parking_distance_provider or HaversineDistanceProvider()
 
     usable = [n for n in nodes if n.parking_pts]
     if len(usable) < num_places:
@@ -357,11 +496,11 @@ def find_route(nodes: List[CountyNode], num_places: int, start_county: Optional[
     else:
         start_idx = 0
 
-    route = nearest_neighbor_route(reps, start_idx)
+    route = nearest_neighbor_route(reps, start_idx, distance_provider)
     if improve_2opt and len(route) >= 4:
-        route = two_opt(reps, route)
+        route = two_opt(reps, route, distance_provider)
 
-    chosen_pts = choose_parking_for_route(selected, route, reps)
+    chosen_pts = choose_parking_for_route(selected, route, reps, parking_distance_provider)
 
     out_rows = []
     for order, (idx, chosen) in enumerate(zip(route, chosen_pts), start=1):
@@ -382,11 +521,162 @@ def find_route(nodes: List[CountyNode], num_places: int, start_county: Optional[
     for i in range(1, len(out)):
         prev = (out.loc[i - 1, "parking_lat"], out.loc[i - 1, "parking_lon"])
         cur = (out.loc[i, "parking_lat"], out.loc[i, "parking_lon"])
-        out.loc[i, "leg_km_from_prev"] = haversine_km(prev, cur)
+        out.loc[i, "leg_km_from_prev"] = distance_provider.distance_km(prev, cur)
     out["total_km"] = out["leg_km_from_prev"].cumsum()
     out["total_svi"] = out["svi_overall"].cumsum()
     out["total_weighted_svi"] = out["weighted_svi"].cumsum()
     return out
+
+
+def build_distance_provider(
+    mode: str,
+    google_api_key: Optional[str],
+    google_options: Optional[GoogleMapsOptions] = None,
+) -> DistanceProvider:
+    normalized = (mode or "haversine").strip().lower()
+    if normalized == "google":
+        if not google_api_key:
+            raise ValueError("google_maps_api_key is required when distance_mode is 'google'.")
+        return GoogleMapsDistanceProvider(api_key=google_api_key, options=google_options)
+    if normalized != "haversine":
+        raise ValueError(f"Unsupported distance_mode '{mode}'. Use 'haversine' or 'google'.")
+    return HaversineDistanceProvider()
+
+
+def _project_root() -> str:
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
+    if path_value is None:
+        return None
+    raw = os.path.expanduser(path_value)
+    abs_path = raw if os.path.isabs(raw) else os.path.join(_project_root(), raw)
+    abs_path = os.path.abspath(abs_path)
+    root = _project_root()
+    if abs_path != root and not abs_path.startswith(root + os.sep):
+        raise ValueError("Path must be within the project directory.")
+    return abs_path
+
+
+def _require_flask() -> None:
+    if Flask is None:
+        raise RuntimeError("Flask is not installed. Install with: pip install flask")
+    if jsonify is None or request is None:
+        raise RuntimeError("Flask import failed; cannot start API.")
+
+
+def _parse_cors_origins(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return ["*"]
+    origins = [o.strip() for o in raw.split(",")]
+    return [o for o in origins if o]
+
+
+def create_app() -> "Flask":
+    _require_flask()
+    app = Flask(__name__)
+    app.config["JSON_SORT_KEYS"] = False
+    cors_origins = _parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS"))
+
+    @app.after_request
+    def _add_cors_headers(response):
+        path = request.path if request else ""
+        if path.startswith("/api/"):
+            origin = request.headers.get("Origin") if request else None
+            allow_origin = None
+            if "*" in cors_origins:
+                allow_origin = "*"
+            elif origin in cors_origins:
+                allow_origin = origin
+            if allow_origin:
+                response.headers["Access-Control-Allow-Origin"] = allow_origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            response.headers["Access-Control-Max-Age"] = "600"
+        return response
+
+    @app.get("/api/health")
+    def health():
+        return jsonify({"status": "ok"})
+
+    @app.post("/api/route")
+    def api_route():
+        payload = request.get_json(silent=True) or {}
+
+        try:
+            svi_csv = payload.get("svi_csv")
+            state = payload.get("state")
+            num_places = payload.get("num_places")
+            if not svi_csv or not state or num_places is None:
+                return jsonify({"error": "svi_csv, state, and num_places are required."}), 400
+
+            num_places = int(num_places)
+            svi_weight = float(payload.get("svi_weight", 1.0))
+            start_county = payload.get("start_county")
+            improve_2opt = bool(payload.get("improve_2opt", True))
+            use_centroid_fallback = bool(payload.get("use_centroid_fallback", True))
+            sleep_s = float(payload.get("sleep_s", 0.0))
+
+            svi_csv_path = _resolve_project_path(str(svi_csv))
+            cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
+
+            if not svi_csv_path or not os.path.exists(svi_csv_path):
+                return jsonify({"error": f"svi_csv not found: {svi_csv}"}), 400
+
+            google_config = payload.get("google", {}) or {}
+            google_options = GoogleMapsOptions(
+                mode=str(google_config.get("mode", "driving")),
+                units=str(google_config.get("units", "metric")),
+                avoid_tolls=bool(google_config.get("avoid_tolls", False)),
+                avoid_highways=bool(google_config.get("avoid_highways", False)),
+            )
+
+            google_api_key = payload.get("google_maps_api_key") or os.getenv("GOOGLE_MAPS_API_KEY")
+
+            distance_provider = build_distance_provider(
+                mode=str(payload.get("distance_mode", "haversine")),
+                google_api_key=google_api_key,
+                google_options=google_options,
+            )
+            parking_distance_provider = build_distance_provider(
+                mode=str(payload.get("parking_distance_mode", "haversine")),
+                google_api_key=google_api_key,
+                google_options=google_options,
+            )
+
+            nodes = build_nodes(
+                svi_csv=svi_csv_path,
+                state_name=str(state),
+                svi_weight=svi_weight,
+                sleep_s=sleep_s,
+                use_centroid_if_missing=use_centroid_fallback,
+                cache_csv=cache_csv_path,
+            )
+
+            route_df = find_route(
+                nodes=nodes,
+                num_places=num_places,
+                start_county=start_county,
+                improve_2opt=improve_2opt,
+                distance_provider=distance_provider,
+                parking_distance_provider=parking_distance_provider,
+            )
+
+            records = route_df.to_dict(orient="records")
+            summary = {
+                "num_stops": len(records),
+                "total_km": float(route_df["total_km"].iloc[-1]) if not route_df.empty else 0.0,
+                "total_svi": float(route_df["total_svi"].iloc[-1]) if not route_df.empty else 0.0,
+                "total_weighted_svi": float(route_df["total_weighted_svi"].iloc[-1]) if not route_df.empty else 0.0,
+            }
+
+            return jsonify({"summary": summary, "stops": records})
+
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    return app
 
 
 def main():
