@@ -31,11 +31,13 @@ try:
 except Exception:
     folium = None
 
+# Simple latitude/longitude pair.
 LatLon = Tuple[float, float]  # (lat, lon)
 
 
 @dataclass(frozen=True)
 class GoogleMapsOptions:
+    # Options map directly to Distance Matrix API parameters.
     mode: str = "driving"
     units: str = "metric"
     avoid_tolls: bool = False
@@ -44,6 +46,7 @@ class GoogleMapsOptions:
 
 @dataclass(frozen=True)
 class CountyNode:
+    # Represents one county with SVI and candidate parking points.
     state: str
     county: str
     fips: str
@@ -57,6 +60,7 @@ class CountyNode:
 # ---------------------------
 
 def parse_latlon_list(cell) -> List[LatLon]:
+    # Parse "lat,lon; lat,lon" strings into tuples.
     if cell is None or (isinstance(cell, float) and math.isnan(cell)):
         return []
     pts: List[LatLon] = []
@@ -73,6 +77,7 @@ def parse_latlon_list(cell) -> List[LatLon]:
 
 
 def haversine_km(a: LatLon, b: LatLon) -> float:
+    # Great-circle distance for quick, offline distance estimates.
     lat1, lon1 = a
     lat2, lon2 = b
     r = 6371.0088
@@ -85,6 +90,7 @@ def haversine_km(a: LatLon, b: LatLon) -> float:
 
 
 class DistanceProvider:
+    # Strategy interface so routing can swap distance sources.
     def distance_km(self, a: LatLon, b: LatLon) -> float:
         raise NotImplementedError
 
@@ -93,11 +99,13 @@ class DistanceProvider:
 
 
 class HaversineDistanceProvider(DistanceProvider):
+    # Default: fast, no API calls.
     def distance_km(self, a: LatLon, b: LatLon) -> float:
         return haversine_km(a, b)
 
 
 class GoogleMapsDistanceProvider(DistanceProvider):
+    # Uses Google Distance Matrix; falls back to haversine on errors.
     def __init__(self, api_key: str, options: Optional[GoogleMapsOptions] = None, max_destinations: int = 25):
         if googlemaps is None:
             raise RuntimeError("googlemaps is not installed. Install with: pip install googlemaps")
@@ -106,6 +114,7 @@ class GoogleMapsDistanceProvider(DistanceProvider):
         self.client = googlemaps.Client(key=api_key)
         self.options = options or GoogleMapsOptions()
         self.max_destinations = max_destinations
+        # Cache avoids repeated API calls for the same pairs.
         self._cache: Dict[Tuple[float, float, float, float, str, bool, bool], float] = {}
 
     def distance_km(self, a: LatLon, b: LatLon) -> float:
@@ -121,6 +130,7 @@ class GoogleMapsDistanceProvider(DistanceProvider):
             return []
 
         results: List[float] = []
+        # Distance Matrix limits destinations per request; chunk to stay within limits.
         for i in range(0, len(destinations), self.max_destinations):
             chunk = destinations[i:i + self.max_destinations]
             results.extend(self._fetch_chunk(origin, chunk))
@@ -145,6 +155,7 @@ class GoogleMapsDistanceProvider(DistanceProvider):
             km = self._element_distance_km(origin, dest, element)
             results.append(km)
 
+        # Fill any missing entries using haversine to keep routing functional.
         if len(results) < len(destinations):
             for dest in destinations[len(results):]:
                 results.append(haversine_km(origin, dest))
@@ -160,6 +171,7 @@ class GoogleMapsDistanceProvider(DistanceProvider):
         return haversine_km(origin, dest)
 
     def _cache_key(self, a: LatLon, b: LatLon) -> Tuple[float, float, float, float, str, bool, bool]:
+        # Round to reduce cache cardinality without losing practical precision.
         return (
             round(a[0], 6),
             round(a[1], 6),
@@ -184,6 +196,7 @@ class GoogleMapsDistanceProvider(DistanceProvider):
 
 
 def centroid_fallback(county_name: str, state_name: str) -> Optional[LatLon]:
+    # Uses OSM Nominatim via osmnx to approximate county centroid.
     if ox is None:
         return None
     place = f"{county_name}, {state_name}, USA"
@@ -291,6 +304,7 @@ def get_parking_lots_for_county(county_name: str, state_name: str, sleep_s: floa
 
 
 def representative_point(pts: List[LatLon]) -> Optional[LatLon]:
+    # Approximate county "center" using the parking points themselves.
     if not pts:
         return None
     mean_lat = sum(p[0] for p in pts) / len(pts)
@@ -303,6 +317,7 @@ def representative_point(pts: List[LatLon]) -> Optional[LatLon]:
 # ---------------------------
 
 def nearest_neighbor_route(points: List[LatLon], start_idx: int, distance_provider: DistanceProvider) -> List[int]:
+    # Greedy nearest-neighbor route construction.
     n = len(points)
     unvisited = set(range(n))
     route = [start_idx]
@@ -319,12 +334,14 @@ def nearest_neighbor_route(points: List[LatLon], start_idx: int, distance_provid
 
 
 def route_length_km(points: List[LatLon], route: List[int], distance_provider: DistanceProvider) -> float:
+    # Total path length for an open route.
     if len(route) <= 1:
         return 0.0
     return sum(distance_provider.distance_km(points[route[i]], points[route[i + 1]]) for i in range(len(route) - 1))
 
 
 def two_opt(points: List[LatLon], route: List[int], distance_provider: DistanceProvider, max_iters: int = 500) -> List[int]:
+    # 2-opt improvement for an open route.
     best = route[:]
     best_len = route_length_km(points, best, distance_provider)
     n = len(best)
@@ -352,6 +369,7 @@ def choose_parking_for_route(
     reps: List[LatLon],
     distance_provider: DistanceProvider,
 ) -> List[LatLon]:
+    # Choose per-county parking points that minimize detours to neighbors.
     chosen: List[LatLon] = []
     for pos, idx in enumerate(route):
         node = nodes[idx]
@@ -393,6 +411,7 @@ def build_nodes(
     use_centroid_if_missing: bool,
     cache_csv: Optional[str],
 ) -> List[CountyNode]:
+    # Read SVI data, attach parking lots, and construct CountyNode list.
     df = pd.read_csv(svi_csv, dtype=str)
 
     required = {"STATE", "COUNTY", "FIPS", "RPL_THEMES"}
@@ -462,6 +481,7 @@ def find_route(
     distance_provider: Optional[DistanceProvider] = None,
     parking_distance_provider: Optional[DistanceProvider] = None,
 ) -> pd.DataFrame:
+    # Select counties by SVI, then compute route order and per-stop parking.
     if num_places <= 0:
         raise ValueError("num_places must be >= 1")
 
@@ -533,6 +553,7 @@ def build_distance_provider(
     google_api_key: Optional[str],
     google_options: Optional[GoogleMapsOptions] = None,
 ) -> DistanceProvider:
+    # Factory to choose haversine vs Google travel distances.
     normalized = (mode or "haversine").strip().lower()
     if normalized == "google":
         if not google_api_key:
@@ -544,10 +565,12 @@ def build_distance_provider(
 
 
 def _project_root() -> str:
+    # Use file location so CLI and Flask behave consistently.
     return os.path.abspath(os.path.dirname(__file__))
 
 
 def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
+    # Keep file reads/writes within the project directory.
     if path_value is None:
         return None
     raw = os.path.expanduser(path_value)
@@ -560,6 +583,7 @@ def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
 
 
 def _require_flask() -> None:
+    # Fail fast if Flask isn't available.
     if Flask is None:
         raise RuntimeError("Flask is not installed. Install with: pip install flask")
     if jsonify is None or request is None:
@@ -567,6 +591,7 @@ def _require_flask() -> None:
 
 
 def _parse_cors_origins(raw: Optional[str]) -> List[str]:
+    # Support comma-separated allowlist; default to wildcard.
     if not raw:
         return ["*"]
     origins = [o.strip() for o in raw.split(",")]
@@ -574,6 +599,7 @@ def _parse_cors_origins(raw: Optional[str]) -> List[str]:
 
 
 def create_app() -> "Flask":
+    # Flask app factory for the routing API.
     _require_flask()
     app = Flask(__name__)
     app.config["JSON_SORT_KEYS"] = False
@@ -581,6 +607,7 @@ def create_app() -> "Flask":
 
     @app.after_request
     def _add_cors_headers(response):
+        # Minimal CORS for frontend integration.
         path = request.path if request else ""
         if path.startswith("/api/"):
             origin = request.headers.get("Origin") if request else None
@@ -605,6 +632,7 @@ def create_app() -> "Flask":
         payload = request.get_json(silent=True) or {}
 
         try:
+            # Validate required inputs.
             svi_csv = payload.get("svi_csv")
             state = payload.get("state")
             num_places = payload.get("num_places")
@@ -663,6 +691,7 @@ def create_app() -> "Flask":
                 parking_distance_provider=parking_distance_provider,
             )
 
+            # Serialize results for frontend consumption.
             records = route_df.to_dict(orient="records")
             summary = {
                 "num_stops": len(records),
@@ -680,6 +709,7 @@ def create_app() -> "Flask":
 
 
 def main():
+    # CLI entrypoint for batch usage and local testing.
     ap = argparse.ArgumentParser()
     ap.add_argument("--svi_csv", required=True, help="County SVI CSV with STATE, COUNTY, FIPS, RPL_THEMES")
     ap.add_argument("--state", required=True, help='Full state name, e.g. "Massachusetts"')
