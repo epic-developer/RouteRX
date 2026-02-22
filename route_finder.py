@@ -15,9 +15,10 @@ except Exception:
     googlemaps = None
 
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, Response, jsonify, request
 except Exception:
     Flask = None
+    Response = None
     jsonify = None
     request = None
 
@@ -25,6 +26,11 @@ try:
     import osmnx as ox
 except Exception:
     ox = None
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 try:
     import folium
@@ -106,7 +112,13 @@ class HaversineDistanceProvider(DistanceProvider):
 
 class GoogleMapsDistanceProvider(DistanceProvider):
     # Uses Google Distance Matrix; falls back to haversine on errors.
-    def __init__(self, api_key: str, options: Optional[GoogleMapsOptions] = None, max_destinations: int = 25):
+    def __init__(
+        self,
+        api_key: str,
+        options: Optional[GoogleMapsOptions] = None,
+        max_destinations: int = 25,
+        log_fn=None,
+    ):
         if googlemaps is None:
             raise RuntimeError("googlemaps is not installed. Install with: pip install googlemaps")
         if not api_key:
@@ -116,6 +128,8 @@ class GoogleMapsDistanceProvider(DistanceProvider):
         self.max_destinations = max_destinations
         # Cache avoids repeated API calls for the same pairs.
         self._cache: Dict[Tuple[float, float, float, float, str, bool, bool], float] = {}
+        self._disabled = False
+        self._log_fn = log_fn or (lambda msg: print(msg, flush=True))
 
     def distance_km(self, a: LatLon, b: LatLon) -> float:
         key = self._cache_key(a, b)
@@ -128,6 +142,9 @@ class GoogleMapsDistanceProvider(DistanceProvider):
     def distances_km(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
         if not destinations:
             return []
+
+        if self._disabled:
+            return [haversine_km(origin, dest) for dest in destinations]
 
         results: List[float] = []
         # Distance Matrix limits destinations per request; chunk to stay within limits.
@@ -145,10 +162,14 @@ class GoogleMapsDistanceProvider(DistanceProvider):
                 units=self.options.units,
                 avoid=self._avoid_list() or None,
             )
+            if response.get("status") not in (None, "OK"):
+                self._disable(f"Google Maps API error: {response.get('status')}. Falling back to haversine.")
+                return [haversine_km(origin, dest) for dest in destinations]
             rows = response.get("rows", [])
             elements = rows[0].get("elements", []) if rows else []
-        except Exception:
-            elements = []
+        except Exception as exc:
+            self._disable(f"Google Maps API exception: {exc}. Falling back to haversine.")
+            return [haversine_km(origin, dest) for dest in destinations]
 
         results: List[float] = []
         for dest, element in zip(destinations, elements):
@@ -168,7 +189,14 @@ class GoogleMapsDistanceProvider(DistanceProvider):
                 km = float(distance["value"]) / 1000.0
                 self._cache[self._cache_key(origin, dest)] = km
                 return km
+        if element.get("status") in {"REQUEST_DENIED", "INVALID_REQUEST", "OVER_DAILY_LIMIT", "OVER_QUERY_LIMIT"}:
+            self._disable(f"Google Maps API error: {element.get('status')}. Falling back to haversine.")
         return haversine_km(origin, dest)
+
+    def _disable(self, message: str) -> None:
+        if not self._disabled:
+            self._disabled = True
+            self._log_fn(message)
 
     def _cache_key(self, a: LatLon, b: LatLon) -> Tuple[float, float, float, float, str, bool, bool]:
         # Round to reduce cache cardinality without losing practical precision.
@@ -258,6 +286,48 @@ def export_route_map_html(route_df: pd.DataFrame, html_path: str) -> None:
         folium.Marker([lat, lon], popup=popup, icon=icon).add_to(m)
 
     m.save(html_path)
+
+
+def build_route_map_html(route_df: pd.DataFrame) -> str:
+    """
+    Build an interactive HTML map of the route as a string.
+    Requires folium installed: pip install folium
+    """
+    if folium is None:
+        raise RuntimeError("folium is not installed. Install with: pip install folium")
+
+    if route_df.empty:
+        raise ValueError("route_df is empty; nothing to map.")
+
+    coords = list(zip(route_df["parking_lat"].astype(float), route_df["parking_lon"].astype(float)))
+    mean_lat = sum(lat for lat, _ in coords) / len(coords)
+    mean_lon = sum(lon for _, lon in coords) / len(coords)
+
+    m = folium.Map(location=[mean_lat, mean_lon], zoom_start=8, tiles="OpenStreetMap")
+    folium.PolyLine(locations=coords, weight=4, opacity=0.8).add_to(m)
+
+    for i, row in route_df.iterrows():
+        lat = float(row["parking_lat"])
+        lon = float(row["parking_lon"])
+        county = str(row.get("county", ""))
+        svi = row.get("svi_overall", "")
+        order = int(row.get("order", i + 1))
+
+        popup = folium.Popup(
+            f"<b>Stop {order}</b><br>{county}<br>SVI: {svi}",
+            max_width=300
+        )
+
+        if i == 0:
+            icon = folium.Icon(color="green", icon="play", prefix="fa")
+        elif i == len(route_df) - 1:
+            icon = folium.Icon(color="red", icon="stop", prefix="fa")
+        else:
+            icon = folium.Icon(color="blue", icon="circle", prefix="fa")
+
+        folium.Marker([lat, lon], popup=popup, icon=icon).add_to(m)
+
+    return m.get_root().render()
 
 def get_parking_lots_for_county(county_name: str, state_name: str, sleep_s: float = 1.0) -> List[LatLon]:
     """
@@ -410,6 +480,7 @@ def build_nodes(
     sleep_s: float,
     use_centroid_if_missing: bool,
     cache_csv: Optional[str],
+    log_progress: bool = False,
 ) -> List[CountyNode]:
     # Read SVI data, attach parking lots, and construct CountyNode list.
     df = pd.read_csv(svi_csv, dtype=str)
@@ -423,6 +494,8 @@ def build_nodes(
     df = df[df["STATE"].astype(str).str.strip() == state_name].copy()
     if df.empty:
         raise ValueError(f"No rows found for STATE='{state_name}'. Check spelling/case in the CSV.")
+    if log_progress:
+        print(f"[build_nodes] Loaded {len(df)} counties for state '{state_name}'.", flush=True)
 
     # If cached Parking Lots exists, load it
     if "Parking Lots" not in df.columns:
@@ -441,16 +514,23 @@ def build_nodes(
 
     # Build per-county parking lots if missing
     parking_strings: List[str] = []
-    for _, row in df.iterrows():
+    total = len(df)
+    for idx, (_, row) in enumerate(df.iterrows(), start=1):
         state = str(row["STATE"]).strip()
         county = str(row["COUNTY"]).strip()
         fips = str(row["FIPS"]).split(".")[0].zfill(5)
         svi = float(row["RPL_THEMES"])
         weighted = svi_weight * svi
 
+        if log_progress:
+            print(f"[build_nodes] {idx}/{total} {county}", flush=True)
+
         # Use cache first
         cell = parking_cache.get(fips, str(row.get("Parking Lots") or "").strip())
         pts = parse_latlon_list(cell)
+
+        if not pts and log_progress:
+            print(f"[build_nodes]   querying OSM parking lots...", flush=True)
 
         if not pts:
             pts = get_parking_lots_for_county(county, state, sleep_s=sleep_s)
@@ -459,6 +539,8 @@ def build_nodes(
             fallback = centroid_fallback(county, state)
             if fallback is not None:
                 pts = [fallback]
+                if log_progress:
+                    print(f"[build_nodes]   using centroid fallback", flush=True)
 
         # Save back into df (for optional caching)
         parking_cell = "; ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in pts])
@@ -470,6 +552,9 @@ def build_nodes(
     if cache_csv:
         df.to_csv(cache_csv, index=False)
 
+    if log_progress:
+        print(f"[build_nodes] Done building nodes.", flush=True)
+
     return nodes
 
 
@@ -480,6 +565,7 @@ def find_route(
     improve_2opt: bool,
     distance_provider: Optional[DistanceProvider] = None,
     parking_distance_provider: Optional[DistanceProvider] = None,
+    log_progress: bool = False,
 ) -> pd.DataFrame:
     # Select counties by SVI, then compute route order and per-stop parking.
     if num_places <= 0:
@@ -493,6 +579,8 @@ def find_route(
         raise ValueError(f"Only {len(usable)} counties have usable coordinates, but num_places={num_places}.")
 
     # Select top-k by WEIGHTED SVI
+    if log_progress:
+        print(f"[find_route] Selecting top {num_places} counties by weighted SVI.", flush=True)
     usable_sorted = sorted(usable, key=lambda n: n.weighted_svi, reverse=True)
     selected = usable_sorted[:num_places]
 
@@ -516,11 +604,17 @@ def find_route(
     else:
         start_idx = 0
 
+    if log_progress:
+        print("[find_route] Building route with nearest neighbor heuristic.", flush=True)
     route = nearest_neighbor_route(reps, start_idx, distance_provider)
     if improve_2opt and len(route) >= 4:
+        if log_progress:
+            print("[find_route] Improving route with 2-opt.", flush=True)
         route = two_opt(reps, route, distance_provider)
 
     chosen_pts = choose_parking_for_route(selected, route, reps, parking_distance_provider)
+    if log_progress:
+        print("[find_route] Route complete.", flush=True)
 
     out_rows = []
     for order, (idx, chosen) in enumerate(zip(route, chosen_pts), start=1):
@@ -552,13 +646,14 @@ def build_distance_provider(
     mode: str,
     google_api_key: Optional[str],
     google_options: Optional[GoogleMapsOptions] = None,
+    log_fn=None,
 ) -> DistanceProvider:
     # Factory to choose haversine vs Google travel distances.
     normalized = (mode or "haversine").strip().lower()
     if normalized == "google":
         if not google_api_key:
             raise ValueError("google_maps_api_key is required when distance_mode is 'google'.")
-        return GoogleMapsDistanceProvider(api_key=google_api_key, options=google_options)
+        return GoogleMapsDistanceProvider(api_key=google_api_key, options=google_options, log_fn=log_fn)
     if normalized != "haversine":
         raise ValueError(f"Unsupported distance_mode '{mode}'. Use 'haversine' or 'google'.")
     return HaversineDistanceProvider()
@@ -586,7 +681,7 @@ def _require_flask() -> None:
     # Fail fast if Flask isn't available.
     if Flask is None:
         raise RuntimeError("Flask is not installed. Install with: pip install flask")
-    if jsonify is None or request is None:
+    if jsonify is None or request is None or Response is None:
         raise RuntimeError("Flask import failed; cannot start API.")
 
 
@@ -601,8 +696,13 @@ def _parse_cors_origins(raw: Optional[str]) -> List[str]:
 def create_app() -> "Flask":
     # Flask app factory for the routing API.
     _require_flask()
+    if load_dotenv is not None:
+        load_dotenv()
     app = Flask(__name__)
-    app.config["JSON_SORT_KEYS"] = False
+    try:
+        app.json.sort_keys = False
+    except Exception:
+        app.config["JSON_SORT_KEYS"] = False
     cors_origins = _parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS"))
 
     @app.after_request
@@ -623,6 +723,77 @@ def create_app() -> "Flask":
             response.headers["Access-Control-Max-Age"] = "600"
         return response
 
+    def _compute_route(payload: dict) -> Tuple[pd.DataFrame, dict]:
+        # Validate required inputs.
+        svi_csv = payload.get("svi_csv")
+        state = payload.get("state")
+        num_places = payload.get("num_places")
+        if not svi_csv or not state or num_places is None:
+            raise ValueError("svi_csv, state, and num_places are required.")
+
+        num_places = int(num_places)
+        svi_weight = float(payload.get("svi_weight", 1.0))
+        start_county = payload.get("start_county")
+        improve_2opt = bool(payload.get("improve_2opt", True))
+        use_centroid_fallback = bool(payload.get("use_centroid_fallback", True))
+        sleep_s = float(payload.get("sleep_s", 0.0))
+        log_progress = bool(payload.get("log_progress", False))
+
+        svi_csv_path = _resolve_project_path(str(svi_csv))
+        cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
+
+        if not svi_csv_path or not os.path.exists(svi_csv_path):
+            raise ValueError(f"svi_csv not found: {svi_csv}")
+
+        google_config = payload.get("google", {}) or {}
+        google_options = GoogleMapsOptions(
+            mode=str(google_config.get("mode", "driving")),
+            units=str(google_config.get("units", "metric")),
+            avoid_tolls=bool(google_config.get("avoid_tolls", False)),
+            avoid_highways=bool(google_config.get("avoid_highways", False)),
+        )
+
+        google_api_key = payload.get("google_maps_api_key") or os.getenv("GOOGLE_MAPS_API_KEY")
+
+        distance_provider = build_distance_provider(
+            mode=str(payload.get("distance_mode", "haversine")),
+            google_api_key=google_api_key,
+            google_options=google_options,
+        )
+        parking_distance_provider = build_distance_provider(
+            mode=str(payload.get("parking_distance_mode", "haversine")),
+            google_api_key=google_api_key,
+            google_options=google_options,
+        )
+
+        nodes = build_nodes(
+            svi_csv=svi_csv_path,
+            state_name=str(state),
+            svi_weight=svi_weight,
+            sleep_s=sleep_s,
+            use_centroid_if_missing=use_centroid_fallback,
+            cache_csv=cache_csv_path,
+            log_progress=log_progress,
+        )
+
+        route_df = find_route(
+            nodes=nodes,
+            num_places=num_places,
+            start_county=start_county,
+            improve_2opt=improve_2opt,
+            distance_provider=distance_provider,
+            parking_distance_provider=parking_distance_provider,
+            log_progress=log_progress,
+        )
+
+        summary = {
+            "num_stops": len(route_df),
+            "total_km": float(route_df["total_km"].iloc[-1]) if not route_df.empty else 0.0,
+            "total_svi": float(route_df["total_svi"].iloc[-1]) if not route_df.empty else 0.0,
+            "total_weighted_svi": float(route_df["total_weighted_svi"].iloc[-1]) if not route_df.empty else 0.0,
+        }
+        return route_df, summary
+
     @app.get("/api/health")
     def health():
         return jsonify({"status": "ok"})
@@ -632,76 +803,44 @@ def create_app() -> "Flask":
         payload = request.get_json(silent=True) or {}
 
         try:
-            # Validate required inputs.
-            svi_csv = payload.get("svi_csv")
-            state = payload.get("state")
-            num_places = payload.get("num_places")
-            if not svi_csv or not state or num_places is None:
-                return jsonify({"error": "svi_csv, state, and num_places are required."}), 400
-
-            num_places = int(num_places)
-            svi_weight = float(payload.get("svi_weight", 1.0))
-            start_county = payload.get("start_county")
-            improve_2opt = bool(payload.get("improve_2opt", True))
-            use_centroid_fallback = bool(payload.get("use_centroid_fallback", True))
-            sleep_s = float(payload.get("sleep_s", 0.0))
-
-            svi_csv_path = _resolve_project_path(str(svi_csv))
-            cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
-
-            if not svi_csv_path or not os.path.exists(svi_csv_path):
-                return jsonify({"error": f"svi_csv not found: {svi_csv}"}), 400
-
-            google_config = payload.get("google", {}) or {}
-            google_options = GoogleMapsOptions(
-                mode=str(google_config.get("mode", "driving")),
-                units=str(google_config.get("units", "metric")),
-                avoid_tolls=bool(google_config.get("avoid_tolls", False)),
-                avoid_highways=bool(google_config.get("avoid_highways", False)),
-            )
-
-            google_api_key = payload.get("google_maps_api_key") or os.getenv("GOOGLE_MAPS_API_KEY")
-
-            distance_provider = build_distance_provider(
-                mode=str(payload.get("distance_mode", "haversine")),
-                google_api_key=google_api_key,
-                google_options=google_options,
-            )
-            parking_distance_provider = build_distance_provider(
-                mode=str(payload.get("parking_distance_mode", "haversine")),
-                google_api_key=google_api_key,
-                google_options=google_options,
-            )
-
-            nodes = build_nodes(
-                svi_csv=svi_csv_path,
-                state_name=str(state),
-                svi_weight=svi_weight,
-                sleep_s=sleep_s,
-                use_centroid_if_missing=use_centroid_fallback,
-                cache_csv=cache_csv_path,
-            )
-
-            route_df = find_route(
-                nodes=nodes,
-                num_places=num_places,
-                start_county=start_county,
-                improve_2opt=improve_2opt,
-                distance_provider=distance_provider,
-                parking_distance_provider=parking_distance_provider,
-            )
-
-            # Serialize results for frontend consumption.
+            route_df, summary = _compute_route(payload)
             records = route_df.to_dict(orient="records")
-            summary = {
-                "num_stops": len(records),
-                "total_km": float(route_df["total_km"].iloc[-1]) if not route_df.empty else 0.0,
-                "total_svi": float(route_df["total_svi"].iloc[-1]) if not route_df.empty else 0.0,
-                "total_weighted_svi": float(route_df["total_weighted_svi"].iloc[-1]) if not route_df.empty else 0.0,
-            }
-
             return jsonify({"summary": summary, "stops": records})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
 
+    @app.post("/api/route.csv")
+    def api_route_csv():
+        payload = request.get_json(silent=True) or {}
+
+        try:
+            route_df, summary = _compute_route(payload)
+            csv_text = route_df.to_csv(index=False)
+            filename = f"route_{summary['num_stops']}_stops.csv"
+            response = Response(csv_text, mimetype="text/csv")
+            response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            return response
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/route/map")
+    def api_route_map():
+        payload = request.get_json(silent=True) or {}
+
+        try:
+            route_df, _ = _compute_route(payload)
+            html = build_route_map_html(route_df)
+            return Response(html, mimetype="text/html")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/route/preview")
+    def api_route_preview():
+        payload = request.get_json(silent=True) or {}
+
+        try:
+            _, summary = _compute_route(payload)
+            return jsonify({"summary": summary})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -719,10 +858,72 @@ def main():
     ap.add_argument("--no_2opt", action="store_true")
     ap.add_argument("--no_centroid_fallback", action="store_true")
     ap.add_argument("--sleep_s", type=float, default=1.0, help="Sleep between OSM queries to reduce rate limiting")
+    ap.add_argument("--log_progress", action="store_true", help="Print progress while building nodes and routing")
+    ap.add_argument(
+        "--distance_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "haversine", "google"],
+        help="Distance source for routing: auto uses Google if key exists, else haversine",
+    )
+    ap.add_argument(
+        "--parking_distance_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "haversine", "google"],
+        help="Distance source for parking selection: auto defaults to haversine to avoid heavy API usage",
+    )
     ap.add_argument("--cache_csv", type=str, default=None, help="Optional: cache per-county Parking Lots here to avoid re-querying OSM")
     ap.add_argument("--out", type=str, default="route_output.csv")
     ap.add_argument("--html", type=str, default=None, help="Optional: write an interactive route map to this HTML file")
     args = ap.parse_args()
+
+    if load_dotenv is not None:
+        load_dotenv()
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+
+    def _distance_provider_from_env(label: str, mode: str, default_google: bool) -> DistanceProvider:
+        api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+        normalized = (mode or "auto").strip().lower()
+
+        if normalized == "haversine":
+            _log(f"[{label}] Using haversine distance.")
+            return HaversineDistanceProvider()
+
+        if normalized == "google":
+            if not api_key:
+                _log(f"[{label}] GOOGLE_MAPS_API_KEY not set. Using haversine distance.")
+                return HaversineDistanceProvider()
+            try:
+                provider = GoogleMapsDistanceProvider(api_key=api_key, log_fn=_log)
+                _log(f"[{label}] Using Google Maps distance.")
+                return provider
+            except Exception as exc:
+                _log(f"[{label}] Google Maps init failed ({exc}). Using haversine distance.")
+                return HaversineDistanceProvider()
+
+        if normalized == "auto":
+            if default_google and api_key:
+                try:
+                    provider = GoogleMapsDistanceProvider(api_key=api_key, log_fn=_log)
+                    _log(f"[{label}] Using Google Maps distance.")
+                    return provider
+                except Exception as exc:
+                    _log(f"[{label}] Google Maps init failed ({exc}). Using haversine distance.")
+                    return HaversineDistanceProvider()
+
+            if api_key and not default_google:
+                _log(f"[{label}] GOOGLE_MAPS_API_KEY set, but defaulting to haversine for parking selection.")
+            else:
+                _log(f"[{label}] GOOGLE_MAPS_API_KEY not set. Using haversine distance.")
+            return HaversineDistanceProvider()
+
+        raise ValueError(f"Unsupported {label} mode: {mode}")
+
+    distance_provider = _distance_provider_from_env("distance", args.distance_mode, default_google=True)
+    parking_distance_provider = _distance_provider_from_env("parking_distance", args.parking_distance_mode, default_google=False)
 
     nodes = build_nodes(
         svi_csv=args.svi_csv,
@@ -731,6 +932,7 @@ def main():
         sleep_s=args.sleep_s,
         use_centroid_if_missing=not args.no_centroid_fallback,
         cache_csv=args.cache_csv,
+        log_progress=args.log_progress,
     )
 
     route_df = find_route(
@@ -738,6 +940,9 @@ def main():
         num_places=args.num_places,
         start_county=args.start_county,
         improve_2opt=not args.no_2opt,
+        distance_provider=distance_provider,
+        parking_distance_provider=parking_distance_provider,
+        log_progress=args.log_progress,
     )
     route_df.to_csv(args.out, index=False)
     print(route_df.to_string(index=False))

@@ -105,3 +105,31 @@ def test_api_route_haversine(monkeypatch):
     assert data["summary"]["num_stops"] == 2
     assert len(data["stops"]) == 2
     assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"
+
+    csv_resp = client.post("/api/route.csv", json=payload)
+    assert csv_resp.status_code == 200
+    assert "text/csv" in (csv_resp.headers.get("Content-Type") or "")
+    assert "order,state,county" in csv_resp.get_data(as_text=True)
+
+    preview_resp = client.post("/api/route/preview", json=payload)
+    assert preview_resp.status_code == 200
+    preview = preview_resp.get_json()
+    assert preview["summary"]["num_stops"] == 2
+
+
+@pytest.mark.skipif(rf.folium is None, reason="folium is not installed")
+def test_api_route_map(monkeypatch):
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:5173")
+    app = rf.create_app()
+    client = app.test_client()
+
+    payload = {
+        "svi_csv": "tests/data/sample_svi.csv",
+        "state": "Massachusetts",
+        "num_places": 2,
+        "distance_mode": "haversine",
+        "parking_distance_mode": "haversine",
+    }
+    resp = client.post("/api/route/map", json=payload)
+    assert resp.status_code == 200
+    assert "text/html" in (resp.headers.get("Content-Type") or "")
