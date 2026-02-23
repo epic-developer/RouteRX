@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RouteRX</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>RouteRX</h1>
+            <p class="subtitle">Route Finder Application</p>
+        </header>
+
+        <main>
+            <div class="form-section">
+                <h2>Route Settings</h2>
+                <form id="routeForm">
+                    <div class="form-group">
+                        <label for="state">State *</label>
+                        <input type="text" id="state" name="state" placeholder="e.g., Massachusetts" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="num_places">Number of Stops *</label>
+                        <input type="number" id="num_places" name="num_places" min="1" max="100" value="15" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="svi_weight">SVI Weight</label>
+                        <input type="number" id="svi_weight" name="svi_weight" step="0.1" value="1.0">
+                        <small>Higher values prioritize vulnerability</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="start_county">Starting County</label>
+                        <input type="text" id="start_county" name="start_county" placeholder="Optional">
+                    </div>
+
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" name="improve_2opt" id="improve_2opt" checked>
+                            Use 2-opt Optimization
+                        </label>
+                        <label>
+                            <input type="checkbox" name="use_clustering" id="use_clustering">
+                            Use Clustering
+                        </label>
+                        <label>
+                            <input type="checkbox" name="use_centroid_fallback" id="use_centroid_fallback" checked>
+                            Use Centroid Fallback
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="distance_mode">Distance Mode</label>
+                        <select id="distance_mode" name="distance_mode">
+                            <option value="haversine">Haversine (Fast)</option>
+                            <option value="google">Google Maps</option>
+                        </select>
+                        <small>Google Maps requires API key</small>
+                    </div>
+
+                    <button type="submit" class="btn-primary">Generate Route</button>
+                </form>
+            </div>
+
+            <div class="map-section">
+                <div id="mapContainer"></div>
+                
+                <div id="loadingSpinner" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Generating route...</p>
+                </div>
+
+                <div id="resultsSection" class="results-panel" style="display: none;">
+                    <h3>Route Summary</h3>
+                    
+                    <div class="summary-stats">
+                        <div class="stat-card">
+                            <h4 id="totalStops">0</h4>
+                            <p>Stops</p>
+                        </div>
+                        <div class="stat-card">
+                            <h4 id="totalDistance">0</h4>
+                            <p>km</p>
+                        </div>
+                        <div class="stat-card">
+                            <h4 id="totalSVI">0</h4>
+                            <p>Total SVI</p>
+                        </div>
+                    </div>
+
+                    <div class="button-group">
+                        <button id="downloadBtn" class="btn-secondary">Download CSV</button>
+                        <button id="detailsBtn" class="btn-secondary">Details</button>
+                    </div>
+                </div>
+
+                <div id="errorSection" class="error-section" style="display: none;">
+                    <h3>Error</h3>
+                    <p id="errorMessage"></p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
