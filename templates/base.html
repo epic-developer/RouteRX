@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="RouteRX - Optimize healthcare outreach routes based on Social Vulnerability Index">
+    <title>{% block title %}RouteRX - Healthcare Route Planner{% endblock %}</title>
+    
+    <!-- Leaflet CSS for maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <span class="logo">🏥</span>
+                <span class="brand-name">RouteRX</span>
+            </div>
+            <ul class="nav-menu">
+                <li><a href="/" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}">Home</a></li>
+                <li><a href="/about" class="nav-link {% if request.endpoint == 'about' %}active{% endif %}">About</a></li>
+                <li><a href="https://github.com/yourusername/routerx" class="nav-link" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-container">
+            <p>&copy; 2026 RouteRX. Built with data from CDC Social Vulnerability Index.</p>
+            <p class="footer-links">
+                <a href="/api/health" target="_blank">API Status</a> | 
+                <a href="https://www.atsdr.cdc.gov/placeandhealth/svi/index.html" target="_blank">SVI Data</a>
+            </p>
+        </div>
+    </footer>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- Custom JavaScript -->
+    <script src="{{ url_for('static', filename='js/api.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

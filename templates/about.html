@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}About - RouteRX{% endblock %}
+
+{% block content %}
+<div class="container about-page">
+    <div class="card">
+        <h1>About RouteRX</h1>
+        
+        <section class="about-section">
+            <h2>What is RouteRX?</h2>
+            <p>
+                RouteRX is a web-based route optimization tool designed for healthcare organizations 
+                conducting outreach programs in underserved communities. The application uses the 
+                CDC's Social Vulnerability Index (SVI) to identify and prioritize areas most in need 
+                of healthcare services.
+            </p>
+        </section>
+
+        <section class="about-section">
+            <h2>How It Works</h2>
+            <ol class="about-list">
+                <li><strong>Data Collection:</strong> SVI data from CDC/ATSDR provides vulnerability metrics for US counties</li>
+                <li><strong>Selection:</strong> Counties are ranked by vulnerability and geographic constraints</li>
+                <li><strong>Optimization:</strong> Routes are optimized using nearest-neighbor and 2-opt algorithms</li>
+                <li><strong>Visualization:</strong> Results displayed on interactive maps with detailed statistics</li>
+            </ol>
+        </section>
+
+        <section class="about-section">
+            <h2>Social Vulnerability Index (SVI)</h2>
+            <p>
+                The SVI uses 16 US census variables to identify communities that may need support 
+                before, during, or after disasters. It includes factors such as:
+            </p>
+            <ul class="about-list">
+                <li>Socioeconomic status (poverty, unemployment, income)</li>
+                <li>Household composition & disability</li>
+                <li>Minority status & language</li>
+                <li>Housing type & transportation</li>
+            </ul>
+        </section>
+
+        <section class="about-section">
+            <h2>Features</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🗺️</div>
+                    <h3>Interactive Maps</h3>
+                    <p>Visualize routes on interactive maps with detailed stop information</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📊</div>
+                    <h3>Data Export</h3>
+                    <p>Export routes as CSV or standalone HTML maps</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🎯</div>
+                    <h3>Smart Optimization</h3>
+                    <p>2-opt algorithm and K-Means clustering for efficient routes</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🔧</div>
+                    <h3>Flexible Options</h3>
+                    <p>Customize SVI weights, starting points, and distance calculations</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="about-section">
+            <h2>Technical Stack</h2>
+            <ul class="tech-list">
+                <li><strong>Backend:</strong> Python, Flask, Pandas, Scikit-learn</li>
+                <li><strong>Frontend:</strong> HTML5, CSS3, JavaScript (Vanilla)</li>
+                <li><strong>Mapping:</strong> Leaflet.js, Folium</li>
+                <li><strong>Data:</strong> CDC SVI, OpenStreetMap, Google Maps API (optional)</li>
+            </ul>
+        </section>
+
+        <section class="about-section">
+            <h2>Usage Tips</h2>
+            <ul class="about-list">
+                <li>Use full state names (e.g., "Massachusetts" not "MA")</li>
+                <li>Start with 10-15 stops for optimal performance</li>
+                <li>Enable clustering for large datasets (30+ counties)</li>
+                <li>Use Haversine for quick estimates, Google Maps for real driving distances</li>
+                <li>Higher SVI weights prioritize vulnerable areas over distance efficiency</li>
+            </ul>
+        </section>
+
+        <section class="about-section">
+            <h2>Data Sources</h2>
+            <ul class="about-list">
+                <li><a href="https://www.atsdr.cdc.gov/placeandhealth/svi/index.html" target="_blank">CDC/ATSDR Social Vulnerability Index</a></li>
+                <li><a href="https://www.openstreetmap.org/" target="_blank">OpenStreetMap</a></li>
+                <li><a href="https://developers.google.com/maps" target="_blank">Google Maps Platform</a></li>
+            </ul>
+        </section>
+
+        <section class="about-section">
+            <h2>Contact & Support</h2>
+            <p>
+                For questions, bug reports, or feature requests, please visit our 
+                <a href="https://github.com/yourusername/routerx" target="_blank">GitHub repository</a> 
+                or contact us at <a href="mailto:support@routerx.com">support@routerx.com</a>.
+            </p>
+        </section>
+    </div>
+</div>
+{% endblock %}
