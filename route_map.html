@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+<head>
+    
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css"/>
+    <link rel="stylesheet" href="https://netdna.bootstrapcdn.com/bootstrap/3.0.0/css/bootstrap-glyphicons.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.2.0/css/all.min.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.css"/>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/python-visualization/folium/folium/templates/leaflet.awesome.rotate.min.css"/>
+    
+            <meta name="viewport" content="width=device-width,
+                initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+            <style>
+                #map_f07605b88c2ce1649952dd6696d367ff {
+                    position: relative;
+                    width: 100.0%;
+                    height: 100.0%;
+                    left: 0.0%;
+                    top: 0.0%;
+                }
+                .leaflet-container { font-size: 1rem; }
+            </style>
+
+            <style>html, body {
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                padding: 0;
+            }
+            </style>
+
+            <style>#map {
+                position:absolute;
+                top:0;
+                bottom:0;
+                right:0;
+                left:0;
+                }
+            </style>
+
+            <script>
+                L_NO_TOUCH = false;
+                L_DISABLE_3D = false;
+            </script>
+
+        
+</head>
+<body>
+    
+    
+            <div class="folium-map" id="map_f07605b88c2ce1649952dd6696d367ff" ></div>
+        
+</body>
+<script>
+    
+    
+            var map_f07605b88c2ce1649952dd6696d367ff = L.map(
+                "map_f07605b88c2ce1649952dd6696d367ff",
+                {
+                    center: [42.303449750000006, -71.71525475],
+                    crs: L.CRS.EPSG3857,
+                    ...{
+  "zoom": 8,
+  "zoomControl": true,
+  "preferCanvas": false,
+}
+
+                }
+            );
+
+            
+
+        
+    
+            var tile_layer_4d2dd81f6ce3c2a42f1350bc6519dfff = L.tileLayer(
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                {
+  "minZoom": 0,
+  "maxZoom": 19,
+  "maxNativeZoom": 19,
+  "noWrap": false,
+  "attribution": "\u0026copy; \u003ca href=\"https://www.openstreetmap.org/copyright\"\u003eOpenStreetMap\u003c/a\u003e contributors",
+  "subdomains": "abc",
+  "detectRetina": false,
+  "tms": false,
+  "opacity": 1,
+}
+
+            );
+        
+    
+            tile_layer_4d2dd81f6ce3c2a42f1350bc6519dfff.addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var poly_line_156f75655f2be65c3dfa822859f03961 = L.polyline(
+                [[42.110573, -72.13872], [42.35631, -71.17052], [42.419011, -70.930591], [42.058537, -71.067082], [42.062148, -71.073388], [42.351404, -71.907743], [42.412945, -72.477401], [42.65667, -72.956593]],
+                {"bubblingMouseEvents": true, "color": "#3388ff", "dashArray": null, "dashOffset": null, "fill": false, "fillColor": "#3388ff", "fillOpacity": 0.2, "fillRule": "evenodd", "lineCap": "round", "lineJoin": "round", "noClip": false, "opacity": 0.8, "smoothFactor": 1.0, "stroke": true, "weight": 4}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var marker_d222774b94aade7698d28790c58e4cce = L.marker(
+                [42.110573, -72.13872],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_6a962c2d5f3f7063b485733470f93a50 = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "green",
+  "iconColor": "white",
+  "icon": "play",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_70cbdc03a37976b50d54abe42e0b774d = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_0718b7570eb2a9ec7fd68e0547f9b7d0 = $(`<div id="html_0718b7570eb2a9ec7fd68e0547f9b7d0" style="width: 100.0%; height: 100.0%;"><b>Stop 1</b><br>Hampden County<br>SVI: 0.8177</div>`)[0];
+                popup_70cbdc03a37976b50d54abe42e0b774d.setContent(html_0718b7570eb2a9ec7fd68e0547f9b7d0);
+            
+        
+
+        marker_d222774b94aade7698d28790c58e4cce.bindPopup(popup_70cbdc03a37976b50d54abe42e0b774d)
+        ;
+
+        
+    
+    
+                marker_d222774b94aade7698d28790c58e4cce.setIcon(icon_6a962c2d5f3f7063b485733470f93a50);
+            
+    
+            var marker_f758306d511adb90aed4e65531d242aa = L.marker(
+                [42.35631, -71.17052],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_c0dc90d8055fe93ceb79d9a3cba0c753 = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_1fd8dedd478c5a038c74903e4ce4764c = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_23049d93e89196142be9e38a09f17445 = $(`<div id="html_23049d93e89196142be9e38a09f17445" style="width: 100.0%; height: 100.0%;"><b>Stop 2</b><br>Suffolk County<br>SVI: 0.7849</div>`)[0];
+                popup_1fd8dedd478c5a038c74903e4ce4764c.setContent(html_23049d93e89196142be9e38a09f17445);
+            
+        
+
+        marker_f758306d511adb90aed4e65531d242aa.bindPopup(popup_1fd8dedd478c5a038c74903e4ce4764c)
+        ;
+
+        
+    
+    
+                marker_f758306d511adb90aed4e65531d242aa.setIcon(icon_c0dc90d8055fe93ceb79d9a3cba0c753);
+            
+    
+            var marker_7ea4afbb8a5767a26e9982d864cd0710 = L.marker(
+                [42.419011, -70.930591],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_f62891e54e1976ebc1b1dca3d73fe097 = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_a53a113eae0e78fc2fbf59e29a029895 = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_bd008e846eb2f51d7dfd06bc56145373 = $(`<div id="html_bd008e846eb2f51d7dfd06bc56145373" style="width: 100.0%; height: 100.0%;"><b>Stop 3</b><br>Essex County<br>SVI: 0.6055</div>`)[0];
+                popup_a53a113eae0e78fc2fbf59e29a029895.setContent(html_bd008e846eb2f51d7dfd06bc56145373);
+            
+        
+
+        marker_7ea4afbb8a5767a26e9982d864cd0710.bindPopup(popup_a53a113eae0e78fc2fbf59e29a029895)
+        ;
+
+        
+    
+    
+                marker_7ea4afbb8a5767a26e9982d864cd0710.setIcon(icon_f62891e54e1976ebc1b1dca3d73fe097);
+            
+    
+            var marker_2199485b01ef2178ca16238aa932414d = L.marker(
+                [42.058537, -71.067082],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_c52a2fcb55b5752742281b9829e324de = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_d3a1c47751c5c9c2b79cb5e46cfe843c = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_32ef63debf6ac406cfe54c96f7d13226 = $(`<div id="html_32ef63debf6ac406cfe54c96f7d13226" style="width: 100.0%; height: 100.0%;"><b>Stop 4</b><br>Plymouth County<br>SVI: 0.3064</div>`)[0];
+                popup_d3a1c47751c5c9c2b79cb5e46cfe843c.setContent(html_32ef63debf6ac406cfe54c96f7d13226);
+            
+        
+
+        marker_2199485b01ef2178ca16238aa932414d.bindPopup(popup_d3a1c47751c5c9c2b79cb5e46cfe843c)
+        ;
+
+        
+    
+    
+                marker_2199485b01ef2178ca16238aa932414d.setIcon(icon_c52a2fcb55b5752742281b9829e324de);
+            
+    
+            var marker_f9b264aef5d1bc950c16505311a3dbb7 = L.marker(
+                [42.062148, -71.073388],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_60e6f2f615f87f46ac93d99e20a3aa37 = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_fbc74b03ca940630e5d5027c780250d1 = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_d2cd92a52f00a867bae0b970143bc6ad = $(`<div id="html_d2cd92a52f00a867bae0b970143bc6ad" style="width: 100.0%; height: 100.0%;"><b>Stop 5</b><br>Bristol County<br>SVI: 0.6227</div>`)[0];
+                popup_fbc74b03ca940630e5d5027c780250d1.setContent(html_d2cd92a52f00a867bae0b970143bc6ad);
+            
+        
+
+        marker_f9b264aef5d1bc950c16505311a3dbb7.bindPopup(popup_fbc74b03ca940630e5d5027c780250d1)
+        ;
+
+        
+    
+    
+                marker_f9b264aef5d1bc950c16505311a3dbb7.setIcon(icon_60e6f2f615f87f46ac93d99e20a3aa37);
+            
+    
+            var marker_fc44473e205de39a2baf47905df7ad15 = L.marker(
+                [42.351404, -71.907743],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_139527794f998547af93840be0dff41a = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_1e627c7b660634e7024b15d9c1c2d761 = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_1229b3fc04503a4fcae801692a6863e5 = $(`<div id="html_1229b3fc04503a4fcae801692a6863e5" style="width: 100.0%; height: 100.0%;"><b>Stop 6</b><br>Worcester County<br>SVI: 0.51</div>`)[0];
+                popup_1e627c7b660634e7024b15d9c1c2d761.setContent(html_1229b3fc04503a4fcae801692a6863e5);
+            
+        
+
+        marker_fc44473e205de39a2baf47905df7ad15.bindPopup(popup_1e627c7b660634e7024b15d9c1c2d761)
+        ;
+
+        
+    
+    
+                marker_fc44473e205de39a2baf47905df7ad15.setIcon(icon_139527794f998547af93840be0dff41a);
+            
+    
+            var marker_c2025d226639d4568d99bd2793759aad = L.marker(
+                [42.412945, -72.477401],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_24d28190d45f8ce7ce7d5f4394d0160e = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "blue",
+  "iconColor": "white",
+  "icon": "circle",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_40a67a6e473a695a2da905807b5c65b7 = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_d8d3fdfc8e5ebdc554211f4b3d1fdf1e = $(`<div id="html_d8d3fdfc8e5ebdc554211f4b3d1fdf1e" style="width: 100.0%; height: 100.0%;"><b>Stop 7</b><br>Franklin County<br>SVI: 0.4375</div>`)[0];
+                popup_40a67a6e473a695a2da905807b5c65b7.setContent(html_d8d3fdfc8e5ebdc554211f4b3d1fdf1e);
+            
+        
+
+        marker_c2025d226639d4568d99bd2793759aad.bindPopup(popup_40a67a6e473a695a2da905807b5c65b7)
+        ;
+
+        
+    
+    
+                marker_c2025d226639d4568d99bd2793759aad.setIcon(icon_24d28190d45f8ce7ce7d5f4394d0160e);
+            
+    
+            var marker_4acc78381d5a1e60e5806f64c814a435 = L.marker(
+                [42.65667, -72.956593],
+                {
+}
+            ).addTo(map_f07605b88c2ce1649952dd6696d367ff);
+        
+    
+            var icon_b8ac87e61f6dd91916cb48166f026d6b = L.AwesomeMarkers.icon(
+                {
+  "markerColor": "red",
+  "iconColor": "white",
+  "icon": "stop",
+  "prefix": "fa",
+  "extraClasses": "fa-rotate-0",
+}
+            );
+        
+    
+        var popup_25d16cabec38af0ccbbf8e799de7c8d8 = L.popup({
+  "maxWidth": 300,
+});
+
+        
+            
+                var html_e4888733d51dec358e99dd0bf3b6dd37 = $(`<div id="html_e4888733d51dec358e99dd0bf3b6dd37" style="width: 100.0%; height: 100.0%;"><b>Stop 8</b><br>Berkshire County<br>SVI: 0.4235</div>`)[0];
+                popup_25d16cabec38af0ccbbf8e799de7c8d8.setContent(html_e4888733d51dec358e99dd0bf3b6dd37);
+            
+        
+
+        marker_4acc78381d5a1e60e5806f64c814a435.bindPopup(popup_25d16cabec38af0ccbbf8e799de7c8d8)
+        ;
+
+        
+    
+    
+                marker_4acc78381d5a1e60e5806f64c814a435.setIcon(icon_b8ac87e61f6dd91916cb48166f026d6b);
+            
+</script>
+</html>

@@ -1,12 +1,22 @@
-# RouteRX Backend (Flask)
+# RouteRX Backend + CLI
 
-This backend exposes the existing routing pipeline in `route_finder.py` over HTTP so a frontend can request routes with clean JSON.
+This project provides a CLI and a Flask API for computing county-level routes for a mobile clinic van.
 
-**Quick Start**
+**Quick Start (CLI)**
 
-1. Create a virtual environment and install dependencies.
-2. Set `GOOGLE_MAPS_API_KEY` if you want Google travel distances.
-3. Run the API:
+```bash
+python route_finder.py \
+  --svi_csv SVI_2022_US_county.csv \
+  --state "Massachusetts" \
+  --num_places 8 \
+  --svi_weight 1.0 \
+  --cache_csv ma_cached.csv \
+  --out route_output.csv \
+  --html route_map.html \
+  --log_progress
+```
+
+**Quick Start (API)**
 
 ```bash
 export GOOGLE_MAPS_API_KEY="YOUR_KEY"
@@ -15,10 +25,47 @@ flask --app route_finder:create_app run --host 0.0.0.0 --port 8000
 
 **Environment Variables**
 
-- `GOOGLE_MAPS_API_KEY` enables Google Distance Matrix requests when `distance_mode` is `google`.
+- `GOOGLE_MAPS_API_KEY` enables Google Distance Matrix requests.
 - `CORS_ALLOW_ORIGINS` controls CORS for `/api/*`. Default is `*`. Comma-separated list, for example `https://app.example.com,http://localhost:5173`.
 
-**Endpoints**
+**How Routing Works**
+
+1. **Selection (SVI-driven)**  
+   The script selects the top `num_places` counties by `weighted_svi = svi_weight * RPL_THEMES`.
+
+2. **Ordering (distance-driven)**  
+   It orders the selected counties using a nearest-neighbor heuristic and optional 2‑opt improvement.
+
+3. **Parking selection (local optimization)**  
+   For each county, it picks the parking point that minimizes distance to the previous and next stops.
+
+Distances are either haversine (fast, offline) or Google Distance Matrix (slower, paid).
+
+**CLI Usage**
+
+Common flags:
+
+- `--svi_csv` (required): CSV with `STATE, COUNTY, FIPS, RPL_THEMES`.
+- `--state` (required): Full state name, e.g. `Massachusetts`.
+- `--num_places` (required): Number of counties to include.
+- `--svi_weight`: Scale SVI before selection (default `1.0`).
+- `--start_county`: Force-include and start route at this county.
+- `--no_2opt`: Disable 2-opt improvement.
+- `--no_centroid_fallback`: Disable centroid fallback if no parking lots found.
+- `--sleep_s`: Delay between OSM queries (default `1.0`).
+- `--cache_csv`: Cache parking lots to avoid re-querying OSM.
+- `--out`: Output CSV (default `route_output.csv`).
+- `--html`: Output map HTML (optional).
+- `--log_progress`: Print progress logs.
+- `--distance_mode`: `auto|haversine|google` (default `auto`).
+- `--parking_distance_mode`: `auto|haversine|google` (default `auto`).
+
+Notes:
+
+- `distance_mode=auto` uses Google if `GOOGLE_MAPS_API_KEY` is set.
+- `parking_distance_mode=auto` defaults to haversine to avoid excessive API calls.
+
+**API Endpoints**
 
 `GET /api/health`
 
@@ -74,6 +121,22 @@ Example request:
 }
 ```
 
+Example `curl` (similar to the CLI command shown above):
+```bash
+curl -X POST http://localhost:8000/api/route \
+  -H "Content-Type: application/json" \
+  -d '{
+    "svi_csv": "SVI_2022_US_county.csv",
+    "state": "Massachusetts",
+    "num_places": 8,
+    "svi_weight": 1.0,
+    "cache_csv": "ma_cached.csv",
+    "distance_mode": "google",
+    "parking_distance_mode": "haversine",
+    "log_progress": true
+  }'
+```
+
 Response:
 
 ```json
@@ -102,6 +165,48 @@ Response:
   ]
 }
 ```
+
+`POST /api/route.csv`
+
+Returns the same data as `/api/route`, but as CSV (`text/csv`).
+
+Example `curl`:
+```bash
+curl -X POST http://localhost:8000/api/route.csv \
+  -H "Content-Type: application/json" \
+  -d '{
+    "svi_csv": "SVI_2022_US_county.csv",
+    "state": "Massachusetts",
+    "num_places": 8,
+    "svi_weight": 1.0,
+    "cache_csv": "ma_cached.csv",
+    "distance_mode": "google",
+    "parking_distance_mode": "haversine"
+  }' > route_output.csv
+```
+
+`POST /api/route/map`
+
+Returns an interactive HTML map (`text/html`) using Folium. Requires `folium` installed.
+
+Example `curl`:
+```bash
+curl -X POST http://localhost:8000/api/route/map \
+  -H "Content-Type: application/json" \
+  -d '{
+    "svi_csv": "SVI_2022_US_county.csv",
+    "state": "Massachusetts",
+    "num_places": 8,
+    "svi_weight": 1.0,
+    "cache_csv": "ma_cached.csv",
+    "distance_mode": "google",
+    "parking_distance_mode": "haversine"
+  }' > route_map.html
+```
+
+`POST /api/route/preview`
+
+Returns only the summary totals for quick previews.
 
 **Notes**
 
