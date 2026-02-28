@@ -6,8 +6,10 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+import numpy as np
 
 import pandas as pd
+from sklearn.cluster import KMeans
 
 try:
     import googlemaps
@@ -15,12 +17,13 @@ except Exception:
     googlemaps = None
 
 try:
-    from flask import Flask, Response, jsonify, request
+    from flask import Flask, jsonify, request, render_template
 except Exception:
     Flask = None
     Response = None
     jsonify = None
     request = None
+    render_template = None
 
 try:
     import osmnx as ox
@@ -287,11 +290,14 @@ def export_route_map_html(route_df: pd.DataFrame, html_path: str) -> None:
 
     m.save(html_path)
 
-
-def build_route_map_html(route_df: pd.DataFrame) -> str:
+def export_route_map_html_with_clusters(
+    route_df: pd.DataFrame, 
+    cluster_info: Optional[Dict[int, List[str]]], 
+    html_path: str
+) -> None:
     """
-    Build an interactive HTML map of the route as a string.
-    Requires folium installed: pip install folium
+    Export an interactive HTML map showing the route with cluster information.
+    cluster_info: Dict mapping route order -> list of county names in that cluster
     """
     if folium is None:
         raise RuntimeError("folium is not installed. Install with: pip install folium")
@@ -304,20 +310,38 @@ def build_route_map_html(route_df: pd.DataFrame) -> str:
     mean_lon = sum(lon for _, lon in coords) / len(coords)
 
     m = folium.Map(location=[mean_lat, mean_lon], zoom_start=8, tiles="OpenStreetMap")
-    folium.PolyLine(locations=coords, weight=4, opacity=0.8).add_to(m)
+    folium.PolyLine(locations=coords, weight=4, opacity=0.8, color='blue').add_to(m)
 
     for i, row in route_df.iterrows():
         lat = float(row["parking_lat"])
         lon = float(row["parking_lon"])
         county = str(row.get("county", ""))
-        svi = row.get("svi_overall", "")
+        state = str(row.get("state", ""))
+        svi = float(row.get("svi_overall", 0))
         order = int(row.get("order", i + 1))
 
-        popup = folium.Popup(
-            f"<b>Stop {order}</b><br>{county}<br>SVI: {svi}",
-            max_width=300
-        )
+        # Build popup content
+        popup_content = f"<div style='width: 250px; max-height: 300px; overflow-y: auto;'>"
+        popup_content += f"<b>Stop {order}</b><br>"
+        popup_content += f"<b>County:</b> {county}, {state}<br>"
+        popup_content += f"<b>SVI:</b> {svi:.4f} ({svi*100:.1f}%)<br>"
+        
+        # Add cluster information if available
+        if cluster_info and order in cluster_info:
+            cluster_counties = cluster_info[order]
+            popup_content += f"<hr><b>Cluster Counties ({len(cluster_counties)}):</b><br>"
+            popup_content += "<div style='font-size: 0.9em; color: #555;'>"
+            popup_content += "<br>".join(cluster_counties)
+            popup_content += "</div>"
+        
+        popup_content += "</div>"
 
+        # Tooltip (hover)
+        tooltip_text = f"Stop {order}: {county}"
+        if cluster_info and order in cluster_info:
+            tooltip_text += f" (Cluster of {len(cluster_info[order])} counties)"
+
+        # Icon color
         if i == 0:
             icon = folium.Icon(color="green", icon="play", prefix="fa")
         elif i == len(route_df) - 1:
@@ -325,9 +349,14 @@ def build_route_map_html(route_df: pd.DataFrame) -> str:
         else:
             icon = folium.Icon(color="blue", icon="circle", prefix="fa")
 
-        folium.Marker([lat, lon], popup=popup, icon=icon).add_to(m)
+        folium.Marker(
+            [lat, lon], 
+            popup=folium.Popup(popup_content, max_width=300),
+            tooltip=tooltip_text,
+            icon=icon
+        ).add_to(m)
 
-    return m.get_root().render()
+    m.save(html_path)
 
 def get_parking_lots_for_county(county_name: str, state_name: str, sleep_s: float = 1.0) -> List[LatLon]:
     """
@@ -565,8 +594,8 @@ def find_route(
     improve_2opt: bool,
     distance_provider: Optional[DistanceProvider] = None,
     parking_distance_provider: Optional[DistanceProvider] = None,
-    log_progress: bool = False,
-) -> pd.DataFrame:
+    use_clustering: bool = False,
+) -> Tuple[pd.DataFrame, Optional[Dict[int, List[str]]]]:
     # Select counties by SVI, then compute route order and per-stop parking.
     if num_places <= 0:
         raise ValueError("num_places must be >= 1")
@@ -578,11 +607,45 @@ def find_route(
     if len(usable) < num_places:
         raise ValueError(f"Only {len(usable)} counties have usable coordinates, but num_places={num_places}.")
 
-    # Select top-k by WEIGHTED SVI
-    if log_progress:
-        print(f"[find_route] Selecting top {num_places} counties by weighted SVI.", flush=True)
-    usable_sorted = sorted(usable, key=lambda n: n.weighted_svi, reverse=True)
-    selected = usable_sorted[:num_places]
+    if use_clustering and len(usable) > num_places:
+        coords = np.array([[representative_point(n.parking_pts)[0], 
+                           representative_point(n.parking_pts)[1]] for n in usable])
+        weights = np.array([n.weighted_svi for n in usable])
+        
+        kmeans = KMeans(n_clusters=num_places, random_state=42, n_init=10)
+        kmeans.fit(coords, sample_weight=weights)
+        
+        cluster_to_counties: Dict[int, List[str]] = {i: [] for i in range(num_places)}
+        for node, label in zip(usable, kmeans.labels_):
+            cluster_to_counties[label].append(f"{node.county}, {node.state}")
+        
+        # Select one county per cluster (highest weighted_svi in each cluster)
+        selected = []
+        cluster_representatives: Dict[int, CountyNode] = {}
+        
+        for cluster_id in range(num_places):
+            cluster_mask = kmeans.labels_ == cluster_id
+            cluster_nodes = [n for n, m in zip(usable, cluster_mask) if m]
+            best_in_cluster = max(cluster_nodes, key=lambda n: n.weighted_svi)
+            selected.append(best_in_cluster)
+            cluster_representatives[cluster_id] = best_in_cluster
+        
+        # We'll map this to order later (after routing is computed)
+        cluster_info_by_node: Dict[str, List[str]] = {}
+        for cluster_id, counties in cluster_to_counties.items():
+            rep_node = cluster_representatives[cluster_id]
+            key = f"{rep_node.county}|{rep_node.state}"
+            cluster_info_by_node[key] = counties
+        
+    else:
+        # Original: Select top-k by WEIGHTED SVI
+        usable_sorted = sorted(usable, key=lambda n: n.weighted_svi, reverse=True)
+        selected = usable_sorted[:num_places]
+        cluster_info_by_node = None
+
+    # # Select top-k by WEIGHTED SVI
+    # usable_sorted = sorted(usable, key=lambda n: n.weighted_svi, reverse=True)
+    # selected = usable_sorted[:num_places]
 
     # Force include start_county if provided
     if start_county:
@@ -639,7 +702,17 @@ def find_route(
     out["total_km"] = out["leg_km_from_prev"].cumsum()
     out["total_svi"] = out["svi_overall"].cumsum()
     out["total_weighted_svi"] = out["weighted_svi"].cumsum()
-    return out
+
+    if cluster_info_by_node:
+        cluster_info = {}
+        for _, row in out.iterrows():
+            key = f"{row['county']}|{row['state']}"
+            if key in cluster_info_by_node:
+                cluster_info[int(row['order'])] = cluster_info_by_node[key]
+    else:
+        cluster_info = None
+
+    return out, cluster_info
 
 
 def build_distance_provider(
@@ -696,13 +769,13 @@ def _parse_cors_origins(raw: Optional[str]) -> List[str]:
 def create_app() -> "Flask":
     # Flask app factory for the routing API.
     _require_flask()
-    if load_dotenv is not None:
-        load_dotenv()
-    app = Flask(__name__)
-    try:
-        app.json.sort_keys = False
-    except Exception:
-        app.config["JSON_SORT_KEYS"] = False
+    app = Flask(
+        __name__,
+        static_folder="static",
+        static_url_path="/static",
+        template_folder="templates"
+        )
+    app.config["JSON_SORT_KEYS"] = False
     cors_origins = _parse_cors_origins(os.getenv("CORS_ALLOW_ORIGINS"))
 
     @app.after_request
@@ -797,17 +870,54 @@ def create_app() -> "Flask":
     @app.get("/api/health")
     def health():
         return jsonify({"status": "ok"})
+    
+    @app.get("/")
+    def index():
+        return render_template("index.html")
+    
+    @app.get("/api/health")
+    def api_health():
+        return jsonify({"status": "ok"})
+    
+    @app.route("/about")
+    def about():
+        return render_template("about.html")
 
     @app.post("/api/route")
     def api_route():
         payload = request.get_json(silent=True) or {}
 
         try:
-            route_df, summary = _compute_route(payload)
-            records = route_df.to_dict(orient="records")
-            return jsonify({"summary": summary, "stops": records})
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            # Validate required inputs.
+            svi_csv = payload.get("svi_csv") or "SVI_2022_US_county.csv"
+            state = payload.get("state")
+            num_places = payload.get("num_places")
+            if not state or num_places is None:
+                return jsonify({"error": "svi_csv, state, and num_places are required."}), 400
+
+            num_places = int(num_places)
+            svi_weight = float(payload.get("svi_weight", 1.0))
+            start_county = payload.get("start_county")
+            improve_2opt = bool(payload.get("improve_2opt", True))
+            use_centroid_fallback = bool(payload.get("use_centroid_fallback", True))
+            use_clustering = bool(payload.get("use_clustering", False))
+            sleep_s = float(payload.get("sleep_s", 0.0))
+
+            svi_csv_path = _resolve_project_path(str(svi_csv))
+            cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
+
+            if not svi_csv_path or not os.path.exists(svi_csv_path):
+                return jsonify({"error": f"svi_csv not found: {svi_csv}"}), 400
+
+            google_config = payload.get("google", {}) or {}
+            google_options = GoogleMapsOptions(
+                mode=str(google_config.get("mode", "driving")),
+                units=str(google_config.get("units", "metric")),
+                avoid_tolls=bool(google_config.get("avoid_tolls", False)),
+                avoid_highways=bool(google_config.get("avoid_highways", False)),
+            )
+
+            google_api_key = payload.get("google_maps_api_key") or os.getenv("GOOGLE_MAPS_API_KEY")
 
     @app.post("/api/route.csv")
     def api_route_csv():
@@ -823,20 +933,35 @@ def create_app() -> "Flask":
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
-    @app.post("/api/route/map")
-    def api_route_map():
-        payload = request.get_json(silent=True) or {}
+            route_df, cluster_info = find_route(
+                nodes=nodes,
+                num_places=num_places,
+                start_county=start_county,
+                improve_2opt=improve_2opt,
+                distance_provider=distance_provider,
+                parking_distance_provider=parking_distance_provider,
+                use_clustering=use_clustering
+            )
 
-        try:
-            route_df, _ = _compute_route(payload)
-            html = build_route_map_html(route_df)
-            return Response(html, mimetype="text/html")
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            # Serialize results for frontend consumption.
+            records = route_df.to_dict(orient="records")
+            
+            # Add cluster info to each record
+            if cluster_info:
+                for record in records:
+                    order = record['order']
+                    if order in cluster_info:
+                        record['cluster_counties'] = cluster_info[order]
+                        record['cluster_count'] = len(cluster_info[order])
+            
+            summary = {
+                "num_stops": len(records),
+                "total_km": float(route_df["total_km"].iloc[-1]) if not route_df.empty else 0.0,
+                "total_svi": float(route_df["total_svi"].iloc[-1]) if not route_df.empty else 0.0,
+                "total_weighted_svi": float(route_df["total_weighted_svi"].iloc[-1]) if not route_df.empty else 0.0,
+            }
 
-    @app.post("/api/route/preview")
-    def api_route_preview():
-        payload = request.get_json(silent=True) or {}
+            return jsonify({"stats": summary, "route": records})
 
         try:
             _, summary = _compute_route(payload)
@@ -949,7 +1074,7 @@ def main():
     print(f"\nWrote: {args.out}")
 
     if args.html:
-        export_route_map_html(route_df, args.html)
+        export_route_map_html_with_clusters(route_df, args.html)
         print(f"Wrote map HTML: {args.html}")
 
 
