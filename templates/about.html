@@ -57,7 +57,7 @@
                 <div class="feature-card">
                     <div class="feature-icon">🎯</div>
                     <h3>Smart Optimization</h3>
-                    <p>2-opt algorithm and K-Means clustering for efficient routes</p>
+                    <p>Nearest-neighbor routing, 2-opt improvement, and OSM road-network distances</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">🔧</div>
@@ -70,10 +70,10 @@
         <section class="about-section">
             <h2>Technical Stack</h2>
             <ul class="tech-list">
-                <li><strong>Backend:</strong> Python, Flask, Pandas, Scikit-learn</li>
+                <li><strong>Backend:</strong> Python, Flask, Pandas, OSMnx</li>
                 <li><strong>Frontend:</strong> HTML5, CSS3, JavaScript (Vanilla)</li>
                 <li><strong>Mapping:</strong> Leaflet.js, Folium</li>
-                <li><strong>Data:</strong> CDC SVI, OpenStreetMap, Google Maps API (optional)</li>
+                <li><strong>Data:</strong> CDC SVI and OpenStreetMap</li>
             </ul>
         </section>
 
@@ -82,8 +82,7 @@
             <ul class="about-list">
                 <li>Use full state names (e.g., "Massachusetts" not "MA")</li>
                 <li>Start with 10-15 stops for optimal performance</li>
-                <li>Enable clustering for large datasets (30+ counties)</li>
-                <li>Use Haversine for quick estimates, Google Maps for real driving distances</li>
+                <li>Use Haversine for quick estimates and OSM for road-network distances</li>
                 <li>Higher SVI weights prioritize vulnerable areas over distance efficiency</li>
             </ul>
         </section>
@@ -93,7 +92,6 @@
             <ul class="about-list">
                 <li><a href="https://www.atsdr.cdc.gov/placeandhealth/svi/index.html" target="_blank">CDC/ATSDR Social Vulnerability Index</a></li>
                 <li><a href="https://www.openstreetmap.org/" target="_blank">OpenStreetMap</a></li>
-                <li><a href="https://developers.google.com/maps" target="_blank">Google Maps Platform</a></li>
             </ul>
         </section>
 

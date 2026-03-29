@@ -19,13 +19,11 @@ python route_finder.py \
 **Quick Start (API)**
 
 ```bash
-export GOOGLE_MAPS_API_KEY="YOUR_KEY"
 flask --app route_finder:create_app run --host 0.0.0.0 --port 8000
 ```
 
 **Environment Variables**
 
-- `GOOGLE_MAPS_API_KEY` enables Google Distance Matrix requests.
 - `CORS_ALLOW_ORIGINS` controls CORS for `/api/*`. Default is `*`. Comma-separated list, for example `https://app.example.com,http://localhost:5173`.
 
 **How Routing Works**
@@ -39,7 +37,7 @@ flask --app route_finder:create_app run --host 0.0.0.0 --port 8000
 3. **Parking selection (local optimization)**  
    For each county, it picks the parking point that minimizes distance to the previous and next stops.
 
-Distances are either haversine (fast, offline) or Google Distance Matrix (slower, paid).
+Distances are either haversine (fast, offline) or OpenStreetMap road-network shortest paths via OSMnx.
 
 **CLI Usage**
 
@@ -57,13 +55,13 @@ Common flags:
 - `--out`: Output CSV (default `route_output.csv`).
 - `--html`: Output map HTML (optional).
 - `--log_progress`: Print progress logs.
-- `--distance_mode`: `auto|haversine|google` (default `auto`).
-- `--parking_distance_mode`: `auto|haversine|google` (default `auto`).
+- `--distance_mode`: `haversine|osm|auto|google` (default `osm`). `google` is accepted as a compatibility alias for `osm`.
+- `--parking_distance_mode`: `haversine|osm|auto|google` (default `haversine`).
 
 Notes:
 
-- `distance_mode=auto` uses Google if `GOOGLE_MAPS_API_KEY` is set.
-- `parking_distance_mode=auto` defaults to haversine to avoid excessive API calls.
+- `distance_mode=osm` uses an OpenStreetMap road network for county ordering and total route distance.
+- `parking_distance_mode=haversine` is the pragmatic default because OSM routing every parking candidate is much slower.
 
 **API Endpoints**
 
@@ -87,17 +85,14 @@ Request body fields:
 - `use_centroid_fallback` (bool, optional, default `true`). If no parking lots found, use county centroid.
 - `sleep_s` (float, optional, default `0.0`). Delay between OSM queries.
 - `cache_csv` (string, optional). Cache parking lots within project directory.
-- `distance_mode` (string, optional, default `haversine`). `haversine` or `google`.
-- `parking_distance_mode` (string, optional, default `haversine`). Use `google` if you want travel-time parking selection.
-- `google_maps_api_key` (string, optional). Overrides the `GOOGLE_MAPS_API_KEY` env var.
-- `google` (object, optional). Google Distance Matrix options. See below for fields.
+- `distance_mode` (string, optional, default `osm`). `haversine` or `osm`.
+- `parking_distance_mode` (string, optional, default `haversine`). `haversine` or `osm`.
+- `osm` (object, optional). OpenStreetMap routing options. See below for fields.
 
-Google options fields (inside `google`):
+OSM options fields (inside `osm`):
 
-- `mode` (string, default `driving`).
-- `units` (string, default `metric`).
-- `avoid_tolls` (bool, default `false`).
-- `avoid_highways` (bool, default `false`).
+- `network_type` (string, default `drive`).
+- `buffer_km` (float, default `25.0`).
 
 Example request:
 ```json
@@ -111,12 +106,11 @@ Example request:
   "use_centroid_fallback": true,
   "sleep_s": 0.0,
   "cache_csv": "ma_cached.csv",
-  "distance_mode": "google",
+  "distance_mode": "osm",
   "parking_distance_mode": "haversine",
-  "google": {
-    "mode": "driving",
-    "avoid_tolls": false,
-    "avoid_highways": false
+  "osm": {
+    "network_type": "drive",
+    "buffer_km": 25.0
   }
 }
 ```
@@ -131,7 +125,7 @@ curl -X POST http://localhost:8000/api/route \
     "num_places": 8,
     "svi_weight": 1.0,
     "cache_csv": "ma_cached.csv",
-    "distance_mode": "google",
+    "distance_mode": "osm",
     "parking_distance_mode": "haversine",
     "log_progress": true
   }'
@@ -180,7 +174,7 @@ curl -X POST http://localhost:8000/api/route.csv \
     "num_places": 8,
     "svi_weight": 1.0,
     "cache_csv": "ma_cached.csv",
-    "distance_mode": "google",
+    "distance_mode": "osm",
     "parking_distance_mode": "haversine"
   }' > route_output.csv
 ```
@@ -199,7 +193,7 @@ curl -X POST http://localhost:8000/api/route/map \
     "num_places": 8,
     "svi_weight": 1.0,
     "cache_csv": "ma_cached.csv",
-    "distance_mode": "google",
+    "distance_mode": "osm",
     "parking_distance_mode": "haversine"
   }' > route_map.html
 ```
@@ -211,5 +205,5 @@ Returns only the summary totals for quick previews.
 **Notes**
 
 - Paths are restricted to the project directory for safety.
-- If `distance_mode` is `google` and no key is provided, the API returns a 400 error.
-- Google distances are cached in-memory per process; restart clears the cache.
+- OSM road distances are cached in-memory per process; restart clears the cache.
+- `distance_mode=google` is treated as a compatibility alias for `osm` so older clients do not break immediately.
