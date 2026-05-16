@@ -158,6 +158,7 @@ Response shape:
       "public_health_departments": 0,
       "pharmacies": 1,
       "resource_sites": 1,
+      "parking_source": "osm",
       "parking_lat": 42.3506,
       "parking_lon": -71.0597,
       "leg_km_from_prev": 0.0,
@@ -170,6 +171,11 @@ Response shape:
 ```
 
 For backward compatibility, the same payload is also exposed as `stats` and `route`.
+
+`parking_source` is one of:
+- `osm`: a real parking candidate returned by OpenStreetMap
+- `representative_fallback`: no parking lot was found, so the ZIP representative point was used
+- `centroid_fallback`: no parking lot or representative point was available, so the ZIP centroid was used
 
 ### `POST /api/route.csv`
 

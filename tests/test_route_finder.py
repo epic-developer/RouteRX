@@ -23,6 +23,12 @@ def test_parse_latlon_list():
     assert rf.parse_latlon_list("1,2; 3,4") == [(1.0, 2.0), (3.0, 4.0)]
 
 
+def test_normalize_zip_code_handles_float_like_values():
+    assert rf.normalize_zip_code("2125.0") == "02125"
+    assert rf.normalize_zip_code(2125.0) == "02125"
+    assert rf.normalize_zip_code_for_state("21160", "MA") == "02116"
+
+
 def test_representative_point():
     # Representative point should be one of the provided points.
     pts = [(0.0, 0.0), (0.0, 2.0), (2.0, 0.0)]
@@ -45,6 +51,7 @@ def test_build_zip_nodes_from_sample_csv():
     assert len(nodes) == 4
     assert {node.zip_code for node in nodes} == {"02108", "02109", "02110", "02111"}
     assert all(node.parking_pts for node in nodes)
+    assert all(node.parking_source == "osm" for node in nodes)
     assert all(node.county == "Suffolk" for node in nodes)
     score_by_zip = {node.zip_code: node.svi for node in nodes}
     assert score_by_zip["02111"] > score_by_zip["02110"] > score_by_zip["02109"] > score_by_zip["02108"]
@@ -113,6 +120,7 @@ def test_find_route_basic():
     assert len(df) == 2
     assert df["order"].tolist() == [1, 2]
     assert df["zip_code"].tolist() == ["02111", "02110"]
+    assert "parking_source" in df.columns
     assert df["total_km"].iloc[-1] >= 0
 
 
@@ -273,12 +281,14 @@ def test_api_route_haversine(monkeypatch):
     assert data["summary"]["num_stops"] == 2
     assert len(data["stops"]) == 2
     assert data["stops"][0]["zip_code"] == "02111"
+    assert data["stops"][0]["parking_source"] == "osm"
     assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"
 
     csv_resp = client.post("/api/route.csv", json=payload)
     assert csv_resp.status_code == 200
     assert "text/csv" in (csv_resp.headers.get("Content-Type") or "")
     assert "order,zip_code,county,state" in csv_resp.get_data(as_text=True)
+    assert "parking_source" in csv_resp.get_data(as_text=True)
 
     preview_resp = client.post("/api/route/preview", json=payload)
     assert preview_resp.status_code == 200

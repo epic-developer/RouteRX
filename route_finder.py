@@ -109,6 +109,7 @@ STATE_NAME_TO_ABBR = {
     "wyoming": "WY",
 }
 STATE_ABBR_TO_NAME = {abbr: name.title() for name, abbr in STATE_NAME_TO_ABBR.items()}
+LEADING_ZERO_STATE_ABBRS = {"CT", "DC", "DE", "MA", "ME", "NH", "NJ", "PR", "RI", "VT"}
 
 
 @dataclass(frozen=True)
@@ -132,15 +133,49 @@ class ZipNode:
     resource_sites: int
     representative_pt: LatLon
     parking_pts: List[LatLon]
+    parking_source: str = "unknown"
 
 
 def normalize_zip_code(value) -> Optional[str]:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
-    digits = "".join(ch for ch in str(value) if ch.isdigit())
+
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+
+    # Pandas often round-trips ZIP codes like 02125 as the float string "2125.0".
+    # Strip the synthetic decimal suffix before extracting digits so we recover 02125.
+    if text.endswith(".0"):
+        text = text[:-2]
+
+    digits = "".join(ch for ch in text if ch.isdigit())
     if not digits:
         return None
     return digits[:5].zfill(5)
+
+
+def normalize_zip_code_for_state(value, state_value: Optional[str]) -> Optional[str]:
+    normalized = normalize_zip_code(value)
+    if normalized is None:
+        return None
+
+    if not state_value:
+        return normalized
+
+    _, state_abbr = canonical_state(str(state_value))
+    raw = str(value).strip()
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    digits = "".join(ch for ch in raw if ch.isdigit())
+
+    # Some source files serialize leading-zero ZIPs like 02116 as 21160.
+    if state_abbr in LEADING_ZERO_STATE_ABBRS and len(digits) == 5 and not digits.startswith("0") and digits.endswith("0"):
+        corrected = digits[:-1].zfill(5)
+        if corrected.startswith("0"):
+            return corrected
+
+    return normalized
 
 
 def normalize_name(value: str) -> str:
@@ -152,6 +187,35 @@ def normalize_county_name(value: str) -> str:
     if name.endswith(" county"):
         name = name[: -len(" county")]
     return name
+
+
+def same_point(a: Optional[LatLon], b: Optional[LatLon], tolerance_km: float = 0.02) -> bool:
+    if a is None or b is None:
+        return False
+    return haversine_km(a, b) <= tolerance_km
+
+
+def infer_parking_source(
+    pts: Sequence[LatLon],
+    representative_pt: Optional[LatLon] = None,
+    centroid_pt: Optional[LatLon] = None,
+    source_hint: Optional[str] = None,
+) -> str:
+    normalized_hint = (source_hint or "").strip().lower()
+    valid_sources = {"osm", "representative_fallback", "centroid_fallback"}
+    if normalized_hint in valid_sources:
+        return normalized_hint
+
+    if not pts:
+        return "unknown"
+
+    if len(pts) == 1:
+        if same_point(pts[0], centroid_pt):
+            return "centroid_fallback"
+        if same_point(pts[0], representative_pt):
+            return "representative_fallback"
+
+    return "osm"
 
 
 def canonical_state(state_name: str) -> Tuple[str, str]:
@@ -390,40 +454,63 @@ def geometry_for_zip(zip_code: str, state_name: str):
     return geocode_place_geometry(f"{zip_code}, {state_name}, USA")
 
 
-def get_parking_lots_for_zip(zip_code: str, state_name: str, sleep_s: float = 1.0) -> List[LatLon]:
+def parking_points_from_features(features_df) -> List[LatLon]:
+    if features_df is None or features_df.empty:
+        return []
+
+    parks = features_df
+    if "access" in parks.columns:
+        parks = parks[~parks["access"].isin(["private", "no", "customers"])]
+    if parks.empty:
+        return []
+
+    pts: List[LatLon] = []
+    seen = set()
+    for geom in parks.geometry:
+        if geom.is_empty:
+            continue
+        pt = geom.centroid if geom.geom_type in ["Polygon", "MultiPolygon"] else geom
+        latlon = (round(float(pt.y), 6), round(float(pt.x), 6))
+        if latlon in seen:
+            continue
+        seen.add(latlon)
+        pts.append((float(pt.y), float(pt.x)))
+    return pts
+
+
+def get_parking_lots_for_zip(
+    zip_code: str,
+    state_name: str,
+    representative_pt: Optional[LatLon] = None,
+    sleep_s: float = 1.0,
+    nearby_search_m: float = 1200.0,
+) -> List[LatLon]:
     if ox is None:
         return []
 
     geometry = geometry_for_zip(zip_code, state_name)
-    if geometry is None:
-        return []
+    pts: List[LatLon] = []
 
-    try:
-        polygon = geometry
-        if polygon.geom_type == "Point":
-            polygon = polygon.buffer(0.03)
+    if geometry is not None:
+        try:
+            polygon = geometry
+            if polygon.geom_type == "Point":
+                polygon = polygon.buffer(0.03)
+            pts = parking_points_from_features(ox.features.features_from_polygon(polygon, {"amenity": "parking"}))
+        except Exception:
+            pts = []
 
-        parks = ox.features.features_from_polygon(polygon, {"amenity": "parking"})
-        if parks.empty:
-            return []
+    if not pts and representative_pt is not None:
+        try:
+            pts = parking_points_from_features(
+                ox.features.features_from_point(representative_pt, {"amenity": "parking"}, dist=nearby_search_m)
+            )
+        except Exception:
+            pts = []
 
-        if "access" in parks.columns:
-            parks = parks[~parks["access"].isin(["private", "no", "customers"])]
-        if parks.empty:
-            return []
-
-        pts: List[LatLon] = []
-        for geom in parks.geometry:
-            if geom.is_empty:
-                continue
-            pt = geom.centroid if geom.geom_type in ["Polygon", "MultiPolygon"] else geom
-            pts.append((float(pt.y), float(pt.x)))
-
-        if sleep_s > 0:
-            time.sleep(sleep_s)
-        return pts
-    except Exception:
-        return []
+    if sleep_s > 0:
+        time.sleep(sleep_s)
+    return pts
 
 
 def representative_point(pts: Sequence[LatLon]) -> Optional[LatLon]:
@@ -675,34 +762,10 @@ def build_zip_catalog(
     log_fn=None,
 ) -> pd.DataFrame:
     log_fn = log_fn or (lambda msg: None)
-    counts_df = pd.read_csv(zip_counts_csv, dtype=str)
-    required = {
-        "ZIP Code",
-        "County",
-        "Hospitals",
-        "Nursing Homes",
-        "Public Health Departments",
-        "Pharmacies",
-    }
-    missing = required - set(counts_df.columns)
-    if missing:
-        raise ValueError(f"ZIP counts CSV missing required columns: {sorted(missing)}")
-
-    counts_df["ZIP Code"] = counts_df["ZIP Code"].map(normalize_zip_code)
-    counts_df = counts_df[counts_df["ZIP Code"].notna()].copy()
-    counts_df["County"] = counts_df["County"].fillna("").astype(str).str.strip()
-
-    metadata: Dict[str, Dict[str, object]] = {}
-    for zip_code in counts_df["ZIP Code"]:
-        metadata[zip_code] = {
-            "state_votes": Counter(),
-            "county_votes": Counter(),
-            "coords": [],
-        }
-
     source_specs = [
         {
             "path": hospitals_csv,
+            "facility_col": "Hospitals",
             "zip_col": "ZIP",
             "state_col": "STATE",
             "county_col": "COUNTY",
@@ -711,6 +774,7 @@ def build_zip_catalog(
         },
         {
             "path": nursing_homes_csv,
+            "facility_col": "Nursing Homes",
             "zip_col": "ZIP",
             "state_col": "STATE",
             "county_col": "COUNTY",
@@ -719,6 +783,7 @@ def build_zip_catalog(
         },
         {
             "path": public_health_csv,
+            "facility_col": "Public Health Departments",
             "zip_col": "ZIP",
             "state_col": "STATE",
             "county_col": "COUNTY",
@@ -727,6 +792,7 @@ def build_zip_catalog(
         },
         {
             "path": pharmacies_csv,
+            "facility_col": "Pharmacies",
             "zip_col": "Zip",
             "state_col": "State",
             "x_col": "x",
@@ -734,10 +800,12 @@ def build_zip_catalog(
         },
     ]
 
-    for spec in source_specs:
-        if not os.path.exists(spec["path"]):
-            continue
+    available_specs = [spec for spec in source_specs if os.path.exists(spec["path"])]
+    if not available_specs and not os.path.exists(zip_counts_csv):
+        raise ValueError("Cannot build ZIP catalog: no facility source CSVs or zip_counts_csv were found.")
 
+    metadata: Dict[str, Dict[str, object]] = {}
+    for spec in available_specs:
         usecols = [spec["zip_col"], spec["state_col"]]
         if "county_col" in spec:
             usecols.append(spec["county_col"])
@@ -748,17 +816,32 @@ def build_zip_catalog(
 
         df = pd.read_csv(spec["path"], usecols=usecols, dtype=str)
         for _, row in df.iterrows():
-            zip_code = normalize_zip_code(row.get(spec["zip_col"]))
-            if not zip_code or zip_code not in metadata:
+            raw_state = str(row.get(spec["state_col"], "") or "").strip()
+            zip_code = normalize_zip_code_for_state(row.get(spec["zip_col"]), raw_state)
+            if not zip_code:
                 continue
 
-            bucket = metadata[zip_code]
-            state_value = str(row.get(spec["state_col"], "")).strip()
-            county_value = str(row.get(spec.get("county_col", ""), "")).strip() if "county_col" in spec else ""
-            if state_value and state_value.lower() != "nan":
-                bucket["state_votes"].update([state_value])
-            if county_value and county_value.lower() != "nan":
-                bucket["county_votes"].update([county_value])
+            bucket = metadata.setdefault(
+                zip_code,
+                {
+                    "state_votes": Counter(),
+                    "county_votes": Counter(),
+                    "coords": [],
+                    "Hospitals": 0,
+                    "Nursing Homes": 0,
+                    "Public Health Departments": 0,
+                    "Pharmacies": 0,
+                },
+            )
+            bucket[spec["facility_col"]] += 1
+
+            if raw_state and raw_state.lower() != "nan":
+                bucket["state_votes"].update([canonical_state(raw_state)[1]])
+
+            if "county_col" in spec:
+                county_value = str(row.get(spec["county_col"], "") or "").strip()
+                if county_value and county_value.lower() != "nan":
+                    bucket["county_votes"].update([county_value.upper()])
 
             coord = None
             if "lat_col" in spec:
@@ -771,18 +854,29 @@ def build_zip_catalog(
             if coord is not None:
                 bucket["coords"].append(coord)
 
+    supplemental_counties: Dict[str, str] = {}
+    if os.path.exists(zip_counts_csv):
+        counts_df = pd.read_csv(zip_counts_csv, dtype=str)
+        if {"ZIP Code", "County"}.issubset(set(counts_df.columns)):
+            counts_df["ZIP Code"] = counts_df["ZIP Code"].map(normalize_zip_code)
+            counts_df = counts_df[counts_df["ZIP Code"].notna()].copy()
+            for _, row in counts_df.iterrows():
+                zip_code = row["ZIP Code"]
+                county_name = str(row.get("County") or "").strip()
+                if county_name:
+                    supplemental_counties[zip_code] = county_name.upper()
+
     rows = []
-    for _, row in counts_df.iterrows():
-        zip_code = row["ZIP Code"]
-        bucket = metadata.get(zip_code, {"state_votes": Counter(), "county_votes": Counter(), "coords": []})
+    for zip_code in sorted(metadata):
+        bucket = metadata[zip_code]
         state_votes: Counter = bucket["state_votes"]  # type: ignore[assignment]
         county_votes: Counter = bucket["county_votes"]  # type: ignore[assignment]
         coords: List[LatLon] = bucket["coords"]  # type: ignore[assignment]
 
         state_abbr = state_votes.most_common(1)[0][0] if state_votes else ""
-        county_name = str(row["County"]).strip()
+        county_name = county_votes.most_common(1)[0][0] if county_votes else ""
         if not county_name:
-            county_name = county_votes.most_common(1)[0][0] if county_votes else ""
+            county_name = supplemental_counties.get(zip_code, "")
 
         rep_lat = None
         rep_lon = None
@@ -795,10 +889,10 @@ def build_zip_catalog(
                 "ZIP Code": zip_code,
                 "State": state_abbr,
                 "County": county_name,
-                "Hospitals": parse_optional_int(row["Hospitals"]),
-                "Nursing Homes": parse_optional_int(row["Nursing Homes"]),
-                "Public Health Departments": parse_optional_int(row["Public Health Departments"]),
-                "Pharmacies": parse_optional_int(row["Pharmacies"]),
+                "Hospitals": int(bucket["Hospitals"]),
+                "Nursing Homes": int(bucket["Nursing Homes"]),
+                "Public Health Departments": int(bucket["Public Health Departments"]),
+                "Pharmacies": int(bucket["Pharmacies"]),
                 "Representative Lat": rep_lat,
                 "Representative Lon": rep_lon,
             }
@@ -820,16 +914,22 @@ def ensure_zip_catalog(
         return zip_catalog_csv
 
     counts_path = _resolve_project_path(zip_counts_csv) or zip_counts_csv
-    if not counts_path or not os.path.exists(counts_path):
+    source_paths = [
+        _resolve_project_path(DEFAULT_HOSPITALS_CSV) or DEFAULT_HOSPITALS_CSV,
+        _resolve_project_path(DEFAULT_NURSING_HOMES_CSV) or DEFAULT_NURSING_HOMES_CSV,
+        _resolve_project_path(DEFAULT_PUBLIC_HEALTH_CSV) or DEFAULT_PUBLIC_HEALTH_CSV,
+        _resolve_project_path(DEFAULT_PHARMACIES_CSV) or DEFAULT_PHARMACIES_CSV,
+    ]
+    if (not counts_path or not os.path.exists(counts_path)) and not any(os.path.exists(path) for path in source_paths):
         raise ValueError(f"ZIP counts CSV not found: {zip_counts_csv}")
 
     build_zip_catalog(
-        zip_counts_csv=counts_path,
+        zip_counts_csv=counts_path or zip_counts_csv,
         output_csv=zip_catalog_csv,
-        hospitals_csv=_resolve_project_path(DEFAULT_HOSPITALS_CSV) or DEFAULT_HOSPITALS_CSV,
-        nursing_homes_csv=_resolve_project_path(DEFAULT_NURSING_HOMES_CSV) or DEFAULT_NURSING_HOMES_CSV,
-        public_health_csv=_resolve_project_path(DEFAULT_PUBLIC_HEALTH_CSV) or DEFAULT_PUBLIC_HEALTH_CSV,
-        pharmacies_csv=_resolve_project_path(DEFAULT_PHARMACIES_CSV) or DEFAULT_PHARMACIES_CSV,
+        hospitals_csv=source_paths[0],
+        nursing_homes_csv=source_paths[1],
+        public_health_csv=source_paths[2],
+        pharmacies_csv=source_paths[3],
         log_fn=log_fn,
     )
     return zip_catalog_csv
@@ -885,7 +985,7 @@ def build_zip_nodes(
     if log_progress:
         print(f"[build_zip_nodes] Loaded {len(df)} ZIP rows for {county_full}, {state_full}.", flush=True)
 
-    parking_cache: Dict[str, str] = {}
+    parking_cache: Dict[str, Tuple[str, str]] = {}
     if cache_csv and os.path.exists(cache_csv):
         cached = pd.read_csv(cache_csv, dtype=str)
         if {"STATE", "COUNTY", "ZIP", "Parking Lots"}.issubset(set(cached.columns)):
@@ -897,7 +997,10 @@ def build_zip_nodes(
             for _, cache_row in cached[cache_mask].iterrows():
                 zip_code = normalize_zip_code(cache_row.get("ZIP"))
                 if zip_code:
-                    parking_cache[zip_code] = str(cache_row.get("Parking Lots") or "").strip()
+                    parking_cache[zip_code] = (
+                        str(cache_row.get("Parking Lots") or "").strip(),
+                        str(cache_row.get("Parking Source") or "").strip(),
+                    )
 
     nodes: List[ZipNode] = []
     cache_rows: List[dict] = []
@@ -912,30 +1015,51 @@ def build_zip_nodes(
         if log_progress:
             print(f"[build_zip_nodes] {idx}/{total} ZIP {zip_code}", flush=True)
 
-        cell = parking_cache.get(zip_code, str(row.get("Parking Lots") or "").strip())
+        centroid_fallback_pt: Optional[LatLon] = None
+        parking_source_hint = ""
+        cached_entry = parking_cache.get(zip_code)
+        if cached_entry is not None:
+            cell, parking_source_hint = cached_entry
+        else:
+            cell = str(row.get("Parking Lots") or "").strip()
+            parking_source_hint = str(row.get("Parking Source") or "").strip()
+
         pts = parse_latlon_list(cell)
+        parking_source = infer_parking_source(pts, representative_pt=representative, source_hint=parking_source_hint)
         if not pts:
             if log_progress:
                 print("[build_zip_nodes]   querying OSM parking lots...", flush=True)
-            pts = get_parking_lots_for_zip(zip_code, state_full, sleep_s=sleep_s)
+            pts = get_parking_lots_for_zip(zip_code, state_full, representative_pt=representative, sleep_s=sleep_s)
+            parking_source = "osm" if pts else parking_source
 
         if not pts and representative is not None:
+            if log_progress:
+                print("[build_zip_nodes]   using representative-point fallback", flush=True)
             pts = [representative]
+            parking_source = "representative_fallback"
 
         if not pts and use_centroid_if_missing:
             geometry = geometry_for_zip(zip_code, state_full)
-            fallback = geometry_centroid(geometry)
-            if fallback is not None:
-                pts = [fallback]
+            centroid_fallback_pt = geometry_centroid(geometry)
+            if centroid_fallback_pt is not None:
+                pts = [centroid_fallback_pt]
                 if representative is None:
-                    representative = fallback
+                    representative = centroid_fallback_pt
                 if log_progress:
                     print("[build_zip_nodes]   using ZIP centroid fallback", flush=True)
+                parking_source = "centroid_fallback"
 
         if representative is None:
             representative = representative_point(pts)
         if representative is None or not pts:
             continue
+
+        parking_source = infer_parking_source(
+            pts,
+            representative_pt=representative,
+            centroid_pt=centroid_fallback_pt,
+            source_hint=parking_source,
+        )
 
         parking_string = "; ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in pts])
         cache_rows.append(
@@ -944,6 +1068,7 @@ def build_zip_nodes(
                 "COUNTY": county_full,
                 "ZIP": zip_code,
                 "Parking Lots": parking_string,
+                "Parking Source": parking_source,
             }
         )
 
@@ -969,6 +1094,7 @@ def build_zip_nodes(
                 resource_sites=resource_sites,
                 representative_pt=representative,
                 parking_pts=pts,
+                parking_source=parking_source,
             )
         )
 
@@ -1075,6 +1201,7 @@ def find_route(
                 "public_health_departments": node.public_health_departments,
                 "pharmacies": node.pharmacies,
                 "resource_sites": node.resource_sites,
+                "parking_source": node.parking_source,
                 "parking_lat": chosen[0],
                 "parking_lon": chosen[1],
             }

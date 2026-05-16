@@ -1,6 +1,6 @@
-ZIP Code,State,County,Hospitals,Nursing Homes,Public Health Departments,Pharmacies,Representative Lat,Representative Lon,Parking Lots
-02108,MA,Suffolk,1,0,1,3,42.3570,-71.0637,"42.3571,-71.0638; 42.3568,-71.0635"
-02109,MA,Suffolk,0,1,0,2,42.3611,-71.0552,"42.3610,-71.0551"
-02110,MA,Suffolk,0,0,1,1,42.3588,-71.0518,"42.3589,-71.0519"
-02111,MA,Suffolk,0,0,0,1,42.3505,-71.0596,"42.3506,-71.0597"
-01970,MA,Essex,1,1,1,1,42.5195,-70.8967,"42.5196,-70.8968"
+ZIP Code,State,County,Hospitals,Nursing Homes,Public Health Departments,Pharmacies,Representative Lat,Representative Lon,Parking Lots,Parking Source
+02108,MA,Suffolk,1,0,1,3,42.3570,-71.0637,"42.3571,-71.0638; 42.3568,-71.0635",osm
+02109,MA,Suffolk,0,1,0,2,42.3611,-71.0552,"42.3610,-71.0551",osm
+02110,MA,Suffolk,0,0,1,1,42.3588,-71.0518,"42.3589,-71.0519",osm
+02111,MA,Suffolk,0,0,0,1,42.3505,-71.0596,"42.3506,-71.0597",osm
+01970,MA,Essex,1,1,1,1,42.5195,-70.8967,"42.5196,-70.8968",osm

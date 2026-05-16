@@ -70,6 +70,7 @@ function displayRouteOnMap(route) {
                 ${stop.county}, ${stop.state}<br>
                 SVI: ${(stop.svi_overall * 100).toFixed(1)}%<br>
                 Resource sites: ${stop.resource_sites}<br>
+                Parking source: ${stop.parking_source}<br>
                 Distance: ${stop.total_km.toFixed(1)} km
             </div>
         `;
@@ -194,7 +195,8 @@ if (downloadBtn) {
                 'Distance (km)',
                 'Total (km)',
                 'Lat',
-                'Lon'
+                'Lon',
+                'Parking Source'
             ],
             ...lastRoute.map(s => [
                 s.order, s.zip_code, s.county, s.state,
@@ -208,7 +210,8 @@ if (downloadBtn) {
                 s.leg_km_from_prev.toFixed(2),
                 s.total_km.toFixed(2),
                 s.parking_lat.toFixed(6),
-                s.parking_lon.toFixed(6)
+                s.parking_lon.toFixed(6),
+                s.parking_source
             ])
         ].map(row => row.join(',')).join('\n');
         
@@ -251,6 +254,7 @@ function generateDetailsHTML(route) {
             <td>${stop.leg_km_from_prev.toFixed(2)}</td>
             <td>${stop.total_km.toFixed(2)}</td>
             <td>${stop.parking_lat.toFixed(4)}, ${stop.parking_lon.toFixed(4)}</td>
+            <td>${stop.parking_source}</td>
         </tr>
     `).join('');
     
@@ -283,6 +287,7 @@ function generateDetailsHTML(route) {
                         <th>Distance from Prev (km)</th>
                         <th>Total Distance (km)</th>
                         <th>Coordinates</th>
+                        <th>Parking Source</th>
                     </tr>
                 </thead>
                 <tbody>
