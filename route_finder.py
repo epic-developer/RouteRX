@@ -4,8 +4,9 @@ import argparse
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -40,6 +41,75 @@ except Exception:
 
 LatLon = Tuple[float, float]
 
+DEFAULT_SVI_CSV = "SVI_2022_US_county.csv"
+DEFAULT_ZIP_COUNTS_CSV = "zip_facility_counts.csv"
+DEFAULT_ZIP_CATALOG_CSV = "zip_facility_catalog.csv"
+DEFAULT_HOSPITALS_CSV = "Hospitals_RAPT_6238935059120575774.csv"
+DEFAULT_NURSING_HOMES_CSV = "Nursing_Homes_RAPT_4878197144364307278.csv"
+DEFAULT_PUBLIC_HEALTH_CSV = "Public_Health_Departments_HIFLD_-4601558331780057158.csv"
+DEFAULT_PHARMACIES_CSV = "RxOpen_041323_Pharmacies_-1189248154250082350.csv"
+FACILITY_COLUMNS = [
+    "Hospitals",
+    "Nursing Homes",
+    "Public Health Departments",
+    "Pharmacies",
+]
+
+STATE_NAME_TO_ABBR = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "district of columbia": "DC",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+}
+STATE_ABBR_TO_NAME = {abbr: name.title() for name, abbr in STATE_NAME_TO_ABBR.items()}
+
 
 @dataclass(frozen=True)
 class OSMOptions:
@@ -48,13 +118,54 @@ class OSMOptions:
 
 
 @dataclass(frozen=True)
-class CountyNode:
+class ZipNode:
     state: str
+    state_abbr: str
     county: str
-    fips: str
+    zip_code: str
     svi: float
     weighted_svi: float
+    hospitals: int
+    nursing_homes: int
+    public_health_departments: int
+    pharmacies: int
+    resource_sites: int
+    representative_pt: LatLon
     parking_pts: List[LatLon]
+
+
+def normalize_zip_code(value) -> Optional[str]:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if not digits:
+        return None
+    return digits[:5].zfill(5)
+
+
+def normalize_name(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
+
+
+def normalize_county_name(value: str) -> str:
+    name = normalize_name(value)
+    if name.endswith(" county"):
+        name = name[: -len(" county")]
+    return name
+
+
+def canonical_state(state_name: str) -> Tuple[str, str]:
+    raw = str(state_name).strip()
+    upper = raw.upper()
+    if upper in STATE_ABBR_TO_NAME:
+        return STATE_ABBR_TO_NAME[upper], upper
+
+    norm = normalize_name(raw)
+    abbr = STATE_NAME_TO_ABBR.get(norm)
+    if abbr:
+        return STATE_ABBR_TO_NAME[abbr], abbr
+
+    return raw, upper
 
 
 def parse_latlon_list(cell) -> List[LatLon]:
@@ -86,14 +197,27 @@ def haversine_km(a: LatLon, b: LatLon) -> float:
     return 2 * r * math.asin(min(1.0, math.sqrt(x)))
 
 
+def web_mercator_to_latlon(x_value, y_value) -> Optional[LatLon]:
+    try:
+        x = float(x_value)
+        y = float(y_value)
+    except Exception:
+        return None
+
+    lon = (x / 20037508.34) * 180.0
+    lat = (y / 20037508.34) * 180.0
+    lat = 180.0 / math.pi * (2.0 * math.atan(math.exp(lat * math.pi / 180.0)) - math.pi / 2.0)
+    return (lat, lon)
+
+
 class DistanceProvider:
-    def prepare(self, points: List[LatLon], log_progress: bool = False) -> None:
+    def prepare(self, points: Sequence[LatLon], log_progress: bool = False) -> None:
         return None
 
     def distance_km(self, a: LatLon, b: LatLon) -> float:
         raise NotImplementedError
 
-    def distances_km(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
+    def distances_km(self, origin: LatLon, destinations: Sequence[LatLon]) -> List[float]:
         return [self.distance_km(origin, dest) for dest in destinations]
 
 
@@ -103,7 +227,7 @@ class HaversineDistanceProvider(DistanceProvider):
 
 
 class OSMRouteDistanceProvider(DistanceProvider):
-    # Uses an OpenStreetMap road network from osmnx and falls back to haversine if routing fails.
+    # Uses an OpenStreetMap road network and falls back to haversine if routing fails.
     def __init__(self, options: Optional[OSMOptions] = None, log_fn=None):
         self.options = options or OSMOptions()
         self.log_fn = log_fn or (lambda msg: print(msg, flush=True))
@@ -113,7 +237,7 @@ class OSMRouteDistanceProvider(DistanceProvider):
         self.distance_cache: Dict[Tuple[float, float, float, float, str], float] = {}
         self.disabled = False
 
-    def prepare(self, points: List[LatLon], log_progress: bool = False) -> None:
+    def prepare(self, points: Sequence[LatLon], log_progress: bool = False) -> None:
         if self.disabled or not points:
             return
 
@@ -122,7 +246,7 @@ class OSMRouteDistanceProvider(DistanceProvider):
             return
 
         try:
-            self._ensure_graph(points, log_progress=log_progress)
+            self._ensure_graph(list(points), log_progress=log_progress)
         except Exception as exc:
             self._disable(f"OSM routing unavailable ({exc}). Falling back to haversine.")
 
@@ -149,10 +273,10 @@ class OSMRouteDistanceProvider(DistanceProvider):
         self.distance_cache[key] = km
         return km
 
-    def distances_km(self, origin: LatLon, destinations: List[LatLon]) -> List[float]:
+    def distances_km(self, origin: LatLon, destinations: Sequence[LatLon]) -> List[float]:
         if not destinations:
             return []
-        self.prepare([origin] + destinations)
+        self.prepare([origin] + list(destinations))
         return [self.distance_km(origin, dest) for dest in destinations]
 
     def _ensure_graph(self, points: List[LatLon], log_progress: bool = False) -> None:
@@ -189,7 +313,7 @@ class OSMRouteDistanceProvider(DistanceProvider):
             self.node_cache[key] = int(ox.distance.nearest_nodes(self.graph, X=point[1], Y=point[0]))
         return self.node_cache[key]
 
-    def _expanded_bbox(self, points: List[LatLon]) -> Tuple[float, float, float, float]:
+    def _expanded_bbox(self, points: Sequence[LatLon]) -> Tuple[float, float, float, float]:
         lats = [p[0] for p in points]
         lons = [p[1] for p in points]
         min_lat = min(lats)
@@ -209,7 +333,7 @@ class OSMRouteDistanceProvider(DistanceProvider):
         return (north, south, east, west)
 
     @staticmethod
-    def _bbox_contains(bbox: Tuple[float, float, float, float], points: List[LatLon]) -> bool:
+    def _bbox_contains(bbox: Tuple[float, float, float, float], points: Sequence[LatLon]) -> bool:
         north, south, east, west = bbox
         return all(south <= lat <= north and west <= lon <= east for lat, lon in points)
 
@@ -240,31 +364,44 @@ class OSMRouteDistanceProvider(DistanceProvider):
             self.log_fn(message)
 
 
-def centroid_fallback(county_name: str, state_name: str) -> Optional[LatLon]:
+def geocode_place_geometry(place_name: str):
     if ox is None:
         return None
-
-    place = f"{county_name}, {state_name}, USA"
     try:
-        gdf = ox.geocode_to_gdf(place)
+        gdf = ox.geocode_to_gdf(place_name)
         if gdf.empty:
             return None
-        pt = gdf.iloc[0].geometry.centroid
+        return gdf.iloc[0].geometry
+    except Exception:
+        return None
+
+
+def geometry_centroid(geometry) -> Optional[LatLon]:
+    if geometry is None:
+        return None
+    try:
+        pt = geometry.centroid
         return (float(pt.y), float(pt.x))
     except Exception:
         return None
 
 
-def get_parking_lots_for_county(county_name: str, state_name: str, sleep_s: float = 1.0) -> List[LatLon]:
+def geometry_for_zip(zip_code: str, state_name: str):
+    return geocode_place_geometry(f"{zip_code}, {state_name}, USA")
+
+
+def get_parking_lots_for_zip(zip_code: str, state_name: str, sleep_s: float = 1.0) -> List[LatLon]:
     if ox is None:
         return []
 
-    place_name = f"{county_name}, {state_name}, USA"
+    geometry = geometry_for_zip(zip_code, state_name)
+    if geometry is None:
+        return []
+
     try:
-        gdf = ox.geocode_to_gdf(place_name)
-        if gdf.empty:
-            return []
-        polygon = gdf.iloc[0].geometry
+        polygon = geometry
+        if polygon.geom_type == "Point":
+            polygon = polygon.buffer(0.03)
 
         parks = ox.features.features_from_polygon(polygon, {"amenity": "parking"})
         if parks.empty:
@@ -284,13 +421,12 @@ def get_parking_lots_for_county(county_name: str, state_name: str, sleep_s: floa
 
         if sleep_s > 0:
             time.sleep(sleep_s)
-
         return pts
     except Exception:
         return []
 
 
-def representative_point(pts: List[LatLon]) -> Optional[LatLon]:
+def representative_point(pts: Sequence[LatLon]) -> Optional[LatLon]:
     if not pts:
         return None
     mean_lat = sum(p[0] for p in pts) / len(pts)
@@ -308,17 +444,22 @@ def _build_folium_map(route_df: pd.DataFrame) -> "folium.Map":
     mean_lat = sum(lat for lat, _ in coords) / len(coords)
     mean_lon = sum(lon for _, lon in coords) / len(coords)
 
-    m = folium.Map(location=[mean_lat, mean_lon], zoom_start=8, tiles="OpenStreetMap")
+    m = folium.Map(location=[mean_lat, mean_lon], zoom_start=11, tiles="OpenStreetMap")
     folium.PolyLine(locations=coords, weight=4, opacity=0.8).add_to(m)
 
     for i, row in route_df.iterrows():
         lat = float(row["parking_lat"])
         lon = float(row["parking_lon"])
+        zip_code = str(row.get("zip_code", ""))
         county = str(row.get("county", ""))
+        state = str(row.get("state", ""))
         svi = row.get("svi_overall", "")
         order = int(row.get("order", i + 1))
 
-        popup = folium.Popup(f"<b>Stop {order}</b><br>{county}<br>SVI: {svi}", max_width=300)
+        popup = folium.Popup(
+            f"<b>Stop {order}</b><br>ZIP {zip_code}<br>{county}, {state}<br>SVI: {svi}",
+            max_width=320,
+        )
         if i == 0:
             icon = folium.Icon(color="green", icon="play", prefix="fa")
         elif i == len(route_df) - 1:
@@ -339,7 +480,7 @@ def export_route_map_html(route_df: pd.DataFrame, html_path: str) -> None:
     _build_folium_map(route_df).save(html_path)
 
 
-def nearest_neighbor_route(points: List[LatLon], start_idx: int, distance_provider: DistanceProvider) -> List[int]:
+def nearest_neighbor_route(points: Sequence[LatLon], start_idx: int, distance_provider: DistanceProvider) -> List[int]:
     n = len(points)
     unvisited = set(range(n))
     route = [start_idx]
@@ -356,14 +497,14 @@ def nearest_neighbor_route(points: List[LatLon], start_idx: int, distance_provid
     return route
 
 
-def route_length_km(points: List[LatLon], route: List[int], distance_provider: DistanceProvider) -> float:
+def route_length_km(points: Sequence[LatLon], route: Sequence[int], distance_provider: DistanceProvider) -> float:
     if len(route) <= 1:
         return 0.0
     return sum(distance_provider.distance_km(points[route[i]], points[route[i + 1]]) for i in range(len(route) - 1))
 
 
 def two_opt(
-    points: List[LatLon],
+    points: Sequence[LatLon],
     route: List[int],
     distance_provider: DistanceProvider,
     max_iters: int = 500,
@@ -391,9 +532,9 @@ def two_opt(
 
 
 def choose_parking_for_route(
-    nodes: List[CountyNode],
-    route: List[int],
-    reps: List[LatLon],
+    nodes: Sequence[ZipNode],
+    route: Sequence[int],
+    reps: Sequence[LatLon],
     distance_provider: DistanceProvider,
 ) -> List[LatLon]:
     chosen: List[LatLon] = []
@@ -424,97 +565,458 @@ def choose_parking_for_route(
     return chosen
 
 
-def build_nodes(
-    svi_csv: str,
+def squared_euclidean(a: LatLon, b: LatLon) -> float:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+
+def kmeans_assignments(points: Sequence[LatLon], k: int, max_iters: int = 30) -> List[int]:
+    if k <= 0:
+        raise ValueError("k must be positive")
+    if k >= len(points):
+        return list(range(len(points)))
+
+    centers = [points[0]]
+    while len(centers) < k:
+        next_point = max(points, key=lambda p: min(squared_euclidean(p, c) for c in centers))
+        centers.append(next_point)
+
+    assignments = [0] * len(points)
+    for _ in range(max_iters):
+        changed = False
+        for i, point in enumerate(points):
+            cluster = min(range(k), key=lambda idx: squared_euclidean(point, centers[idx]))
+            if cluster != assignments[i]:
+                assignments[i] = cluster
+                changed = True
+
+        new_centers: List[LatLon] = []
+        for cluster_idx in range(k):
+            cluster_points = [p for p, a in zip(points, assignments) if a == cluster_idx]
+            if not cluster_points:
+                new_centers.append(centers[cluster_idx])
+                continue
+            mean_lat = sum(p[0] for p in cluster_points) / len(cluster_points)
+            mean_lon = sum(p[1] for p in cluster_points) / len(cluster_points)
+            new_centers.append((mean_lat, mean_lon))
+
+        centers = new_centers
+        if not changed:
+            break
+
+    return assignments
+
+
+def parse_optional_float(value) -> Optional[float]:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def parse_optional_int(value) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return 0
+
+
+def scarcity_rank_score(values: pd.Series) -> pd.Series:
+    # Lower facility counts imply higher scarcity. The score is relative within the county.
+    numeric = values.fillna(0).astype(float)
+    if len(numeric) <= 1 or numeric.nunique(dropna=False) <= 1:
+        return pd.Series([0.5] * len(numeric), index=numeric.index, dtype=float)
+
+    ranks = numeric.rank(method="average", ascending=True)
+    return 1.0 - ((ranks - 1.0) / (len(numeric) - 1.0))
+
+
+def apply_dynamic_zip_svi(df: pd.DataFrame) -> pd.DataFrame:
+    scored = df.copy()
+    scarcity_columns: List[str] = []
+    for column in FACILITY_COLUMNS:
+        scored[column] = scored[column].map(parse_optional_int)
+        scarcity_column = f"_{column}_scarcity"
+        scored[scarcity_column] = scarcity_rank_score(scored[column])
+        scarcity_columns.append(scarcity_column)
+
+    scored["resource_sites"] = scored[FACILITY_COLUMNS].sum(axis=1)
+    scored["zip_svi"] = scored[scarcity_columns].mean(axis=1)
+    return scored
+
+
+def _project_root() -> str:
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
+    if path_value is None:
+        return None
+    raw = os.path.expanduser(path_value)
+    abs_path = raw if os.path.isabs(raw) else os.path.join(_project_root(), raw)
+    abs_path = os.path.abspath(abs_path)
+    root = _project_root()
+    if abs_path != root and not abs_path.startswith(root + os.sep):
+        raise ValueError("Path must be within the project directory.")
+    return abs_path
+
+
+def build_zip_catalog(
+    zip_counts_csv: str,
+    output_csv: str,
+    hospitals_csv: str = DEFAULT_HOSPITALS_CSV,
+    nursing_homes_csv: str = DEFAULT_NURSING_HOMES_CSV,
+    public_health_csv: str = DEFAULT_PUBLIC_HEALTH_CSV,
+    pharmacies_csv: str = DEFAULT_PHARMACIES_CSV,
+    log_fn=None,
+) -> pd.DataFrame:
+    log_fn = log_fn or (lambda msg: None)
+    counts_df = pd.read_csv(zip_counts_csv, dtype=str)
+    required = {
+        "ZIP Code",
+        "County",
+        "Hospitals",
+        "Nursing Homes",
+        "Public Health Departments",
+        "Pharmacies",
+    }
+    missing = required - set(counts_df.columns)
+    if missing:
+        raise ValueError(f"ZIP counts CSV missing required columns: {sorted(missing)}")
+
+    counts_df["ZIP Code"] = counts_df["ZIP Code"].map(normalize_zip_code)
+    counts_df = counts_df[counts_df["ZIP Code"].notna()].copy()
+    counts_df["County"] = counts_df["County"].fillna("").astype(str).str.strip()
+
+    metadata: Dict[str, Dict[str, object]] = {}
+    for zip_code in counts_df["ZIP Code"]:
+        metadata[zip_code] = {
+            "state_votes": Counter(),
+            "county_votes": Counter(),
+            "coords": [],
+        }
+
+    source_specs = [
+        {
+            "path": hospitals_csv,
+            "zip_col": "ZIP",
+            "state_col": "STATE",
+            "county_col": "COUNTY",
+            "lat_col": "LATITUDE",
+            "lon_col": "LONGITUDE",
+        },
+        {
+            "path": nursing_homes_csv,
+            "zip_col": "ZIP",
+            "state_col": "STATE",
+            "county_col": "COUNTY",
+            "lat_col": "LATITUDE",
+            "lon_col": "LONGITUDE",
+        },
+        {
+            "path": public_health_csv,
+            "zip_col": "ZIP",
+            "state_col": "STATE",
+            "county_col": "COUNTY",
+            "x_col": "x2",
+            "y_col": "y2",
+        },
+        {
+            "path": pharmacies_csv,
+            "zip_col": "Zip",
+            "state_col": "State",
+            "x_col": "x",
+            "y_col": "y",
+        },
+    ]
+
+    for spec in source_specs:
+        if not os.path.exists(spec["path"]):
+            continue
+
+        usecols = [spec["zip_col"], spec["state_col"]]
+        if "county_col" in spec:
+            usecols.append(spec["county_col"])
+        if "lat_col" in spec:
+            usecols.extend([spec["lat_col"], spec["lon_col"]])
+        else:
+            usecols.extend([spec["x_col"], spec["y_col"]])
+
+        df = pd.read_csv(spec["path"], usecols=usecols, dtype=str)
+        for _, row in df.iterrows():
+            zip_code = normalize_zip_code(row.get(spec["zip_col"]))
+            if not zip_code or zip_code not in metadata:
+                continue
+
+            bucket = metadata[zip_code]
+            state_value = str(row.get(spec["state_col"], "")).strip()
+            county_value = str(row.get(spec.get("county_col", ""), "")).strip() if "county_col" in spec else ""
+            if state_value and state_value.lower() != "nan":
+                bucket["state_votes"].update([state_value])
+            if county_value and county_value.lower() != "nan":
+                bucket["county_votes"].update([county_value])
+
+            coord = None
+            if "lat_col" in spec:
+                lat = parse_optional_float(row.get(spec["lat_col"]))
+                lon = parse_optional_float(row.get(spec["lon_col"]))
+                if lat is not None and lon is not None:
+                    coord = (lat, lon)
+            else:
+                coord = web_mercator_to_latlon(row.get(spec["x_col"]), row.get(spec["y_col"]))
+            if coord is not None:
+                bucket["coords"].append(coord)
+
+    rows = []
+    for _, row in counts_df.iterrows():
+        zip_code = row["ZIP Code"]
+        bucket = metadata.get(zip_code, {"state_votes": Counter(), "county_votes": Counter(), "coords": []})
+        state_votes: Counter = bucket["state_votes"]  # type: ignore[assignment]
+        county_votes: Counter = bucket["county_votes"]  # type: ignore[assignment]
+        coords: List[LatLon] = bucket["coords"]  # type: ignore[assignment]
+
+        state_abbr = state_votes.most_common(1)[0][0] if state_votes else ""
+        county_name = str(row["County"]).strip()
+        if not county_name:
+            county_name = county_votes.most_common(1)[0][0] if county_votes else ""
+
+        rep_lat = None
+        rep_lon = None
+        if coords:
+            rep_lat = sum(p[0] for p in coords) / len(coords)
+            rep_lon = sum(p[1] for p in coords) / len(coords)
+
+        rows.append(
+            {
+                "ZIP Code": zip_code,
+                "State": state_abbr,
+                "County": county_name,
+                "Hospitals": parse_optional_int(row["Hospitals"]),
+                "Nursing Homes": parse_optional_int(row["Nursing Homes"]),
+                "Public Health Departments": parse_optional_int(row["Public Health Departments"]),
+                "Pharmacies": parse_optional_int(row["Pharmacies"]),
+                "Representative Lat": rep_lat,
+                "Representative Lon": rep_lon,
+            }
+        )
+
+    catalog_df = pd.DataFrame(rows)
+    catalog_df.to_csv(output_csv, index=False)
+    log_fn(f"[zip_catalog] Wrote {len(catalog_df)} ZIP rows to {output_csv}.")
+    return catalog_df
+
+
+def ensure_zip_catalog(
+    zip_catalog_csv: str,
+    zip_counts_csv: str = DEFAULT_ZIP_COUNTS_CSV,
+    log_fn=None,
+) -> str:
+    log_fn = log_fn or (lambda msg: None)
+    if os.path.exists(zip_catalog_csv):
+        return zip_catalog_csv
+
+    counts_path = _resolve_project_path(zip_counts_csv) or zip_counts_csv
+    if not counts_path or not os.path.exists(counts_path):
+        raise ValueError(f"ZIP counts CSV not found: {zip_counts_csv}")
+
+    build_zip_catalog(
+        zip_counts_csv=counts_path,
+        output_csv=zip_catalog_csv,
+        hospitals_csv=_resolve_project_path(DEFAULT_HOSPITALS_CSV) or DEFAULT_HOSPITALS_CSV,
+        nursing_homes_csv=_resolve_project_path(DEFAULT_NURSING_HOMES_CSV) or DEFAULT_NURSING_HOMES_CSV,
+        public_health_csv=_resolve_project_path(DEFAULT_PUBLIC_HEALTH_CSV) or DEFAULT_PUBLIC_HEALTH_CSV,
+        pharmacies_csv=_resolve_project_path(DEFAULT_PHARMACIES_CSV) or DEFAULT_PHARMACIES_CSV,
+        log_fn=log_fn,
+    )
+    return zip_catalog_csv
+
+
+def build_zip_nodes(
+    svi_csv: Optional[str],
+    zip_catalog_csv: str,
     state_name: str,
+    county_name: str,
     svi_weight: float,
     sleep_s: float,
     use_centroid_if_missing: bool,
     cache_csv: Optional[str],
     log_progress: bool = False,
-) -> List[CountyNode]:
-    df = pd.read_csv(svi_csv, dtype=str)
+) -> List[ZipNode]:
+    del svi_csv
 
-    required = {"STATE", "COUNTY", "FIPS", "RPL_THEMES"}
+    state_full, state_abbr = canonical_state(state_name)
+    county_full = str(county_name).strip()
+    county_norm = normalize_county_name(county_full)
+
+    catalog_path = ensure_zip_catalog(zip_catalog_csv, log_fn=(lambda msg: print(msg, flush=True)) if log_progress else None)
+    df = pd.read_csv(catalog_path, dtype=str)
+
+    required = {
+        "ZIP Code",
+        "State",
+        "County",
+        "Hospitals",
+        "Nursing Homes",
+        "Public Health Departments",
+        "Pharmacies",
+        "Representative Lat",
+        "Representative Lon",
+    }
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"SVI CSV missing required columns: {sorted(missing)}")
+        raise ValueError(f"ZIP catalog CSV missing required columns: {sorted(missing)}")
 
-    df = df[df["STATE"].astype(str).str.strip() == state_name].copy()
+    df["ZIP Code"] = df["ZIP Code"].map(normalize_zip_code)
+    mask = (
+        df["State"].fillna("").astype(str).str.upper() == state_abbr
+    ) & (
+        df["County"].fillna("").astype(str).map(normalize_county_name) == county_norm
+    )
+    df = df[mask].copy()
     if df.empty:
-        raise ValueError(f"No rows found for STATE='{state_name}'. Check spelling/case in the CSV.")
+        raise ValueError(f"No ZIP catalog rows found for county='{county_full}', state='{state_full}'.")
+
+    df = apply_dynamic_zip_svi(df)
 
     if log_progress:
-        print(f"[build_nodes] Loaded {len(df)} counties for state '{state_name}'.", flush=True)
-
-    if "Parking Lots" not in df.columns:
-        df["Parking Lots"] = ""
+        print(f"[build_zip_nodes] Loaded {len(df)} ZIP rows for {county_full}, {state_full}.", flush=True)
 
     parking_cache: Dict[str, str] = {}
     if cache_csv and os.path.exists(cache_csv):
         cached = pd.read_csv(cache_csv, dtype=str)
-        if {"STATE", "COUNTY", "FIPS", "Parking Lots"}.issubset(set(cached.columns)):
-            cached = cached[cached["STATE"].astype(str).str.strip() == state_name].copy()
-            for _, r in cached.iterrows():
-                key = str(r["FIPS"]).split(".")[0].zfill(5)
-                parking_cache[key] = str(r.get("Parking Lots") or "").strip()
+        if {"STATE", "COUNTY", "ZIP", "Parking Lots"}.issubset(set(cached.columns)):
+            cache_mask = (
+                cached["STATE"].fillna("").astype(str).map(normalize_name) == normalize_name(state_abbr)
+            ) & (
+                cached["COUNTY"].fillna("").astype(str).map(normalize_county_name) == county_norm
+            )
+            for _, cache_row in cached[cache_mask].iterrows():
+                zip_code = normalize_zip_code(cache_row.get("ZIP"))
+                if zip_code:
+                    parking_cache[zip_code] = str(cache_row.get("Parking Lots") or "").strip()
 
-    nodes: List[CountyNode] = []
-    parking_strings: List[str] = []
+    nodes: List[ZipNode] = []
+    cache_rows: List[dict] = []
     total = len(df)
 
     for idx, (_, row) in enumerate(df.iterrows(), start=1):
-        state = str(row["STATE"]).strip()
-        county = str(row["COUNTY"]).strip()
-        fips = str(row["FIPS"]).split(".")[0].zfill(5)
-        svi = float(row["RPL_THEMES"])
-        weighted = svi_weight * svi
+        zip_code = row["ZIP Code"]
+        rep_lat = parse_optional_float(row["Representative Lat"])
+        rep_lon = parse_optional_float(row["Representative Lon"])
+        representative = (rep_lat, rep_lon) if rep_lat is not None and rep_lon is not None else None
 
         if log_progress:
-            print(f"[build_nodes] {idx}/{total} {county}", flush=True)
+            print(f"[build_zip_nodes] {idx}/{total} ZIP {zip_code}", flush=True)
 
-        cell = parking_cache.get(fips, str(row.get("Parking Lots") or "").strip())
+        cell = parking_cache.get(zip_code, str(row.get("Parking Lots") or "").strip())
         pts = parse_latlon_list(cell)
-
         if not pts:
             if log_progress:
-                print("[build_nodes]   querying OSM parking lots...", flush=True)
-            pts = get_parking_lots_for_county(county, state, sleep_s=sleep_s)
+                print("[build_zip_nodes]   querying OSM parking lots...", flush=True)
+            pts = get_parking_lots_for_zip(zip_code, state_full, sleep_s=sleep_s)
+
+        if not pts and representative is not None:
+            pts = [representative]
 
         if not pts and use_centroid_if_missing:
-            fallback = centroid_fallback(county, state)
+            geometry = geometry_for_zip(zip_code, state_full)
+            fallback = geometry_centroid(geometry)
             if fallback is not None:
                 pts = [fallback]
+                if representative is None:
+                    representative = fallback
                 if log_progress:
-                    print("[build_nodes]   using centroid fallback", flush=True)
+                    print("[build_zip_nodes]   using ZIP centroid fallback", flush=True)
 
-        parking_strings.append("; ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in pts]))
+        if representative is None:
+            representative = representative_point(pts)
+        if representative is None or not pts:
+            continue
+
+        parking_string = "; ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in pts])
+        cache_rows.append(
+            {
+                "STATE": state_abbr,
+                "COUNTY": county_full,
+                "ZIP": zip_code,
+                "Parking Lots": parking_string,
+            }
+        )
+
+        hospitals = int(row["Hospitals"])
+        nursing_homes = int(row["Nursing Homes"])
+        public_health_departments = int(row["Public Health Departments"])
+        pharmacies = int(row["Pharmacies"])
+        resource_sites = int(row["resource_sites"])
+        zip_svi = float(row["zip_svi"])
+
         nodes.append(
-            CountyNode(
-                state=state,
-                county=county,
-                fips=fips,
-                svi=svi,
-                weighted_svi=weighted,
+            ZipNode(
+                state=state_full,
+                state_abbr=state_abbr,
+                county=county_full,
+                zip_code=zip_code,
+                svi=zip_svi,
+                weighted_svi=svi_weight * zip_svi,
+                hospitals=hospitals,
+                nursing_homes=nursing_homes,
+                public_health_departments=public_health_departments,
+                pharmacies=pharmacies,
+                resource_sites=resource_sites,
+                representative_pt=representative,
                 parking_pts=pts,
             )
         )
 
-    df["Parking Lots"] = parking_strings
     if cache_csv:
-        df.to_csv(cache_csv, index=False)
+        pd.DataFrame(cache_rows).to_csv(cache_csv, index=False)
 
     if log_progress:
-        print("[build_nodes] Done building nodes.", flush=True)
+        print(f"[build_zip_nodes] Built {len(nodes)} ZIP nodes.", flush=True)
 
     return nodes
 
 
-def find_route(
-    nodes: List[CountyNode],
+def selection_key(node: ZipNode) -> Tuple[float, str]:
+    # Higher vulnerability wins. ZIP code breaks ties deterministically.
+    return (-node.weighted_svi, node.zip_code)
+
+
+def select_zip_nodes(
+    nodes: Sequence[ZipNode],
     num_places: int,
-    start_county: Optional[str],
+    use_clustering: bool,
+    log_progress: bool = False,
+) -> List[ZipNode]:
+    if not use_clustering or len(nodes) <= num_places:
+        return sorted(nodes, key=selection_key)[:num_places]
+
+    if log_progress:
+        print("[find_route] Clustering ZIP candidates before selection.", flush=True)
+
+    assignments = kmeans_assignments([node.representative_pt for node in nodes], num_places)
+    cluster_map: Dict[int, List[ZipNode]] = {cluster_id: [] for cluster_id in range(num_places)}
+    for node, cluster_id in zip(nodes, assignments):
+        cluster_map[cluster_id].append(node)
+
+    selected = [min(cluster_nodes, key=selection_key) for cluster_nodes in cluster_map.values() if cluster_nodes]
+    selected_by_zip = {node.zip_code for node in selected}
+    if len(selected) < num_places:
+        remainder = [node for node in sorted(nodes, key=selection_key) if node.zip_code not in selected_by_zip]
+        selected.extend(remainder[: num_places - len(selected)])
+
+    return sorted(selected, key=selection_key)[:num_places]
+
+
+def find_route(
+    nodes: List[ZipNode],
+    num_places: int,
     improve_2opt: bool,
+    use_clustering: bool,
     distance_provider: Optional[DistanceProvider] = None,
     parking_distance_provider: Optional[DistanceProvider] = None,
     log_progress: bool = False,
@@ -525,29 +1027,19 @@ def find_route(
     distance_provider = distance_provider or HaversineDistanceProvider()
     parking_distance_provider = parking_distance_provider or HaversineDistanceProvider()
 
-    usable = [n for n in nodes if n.parking_pts]
+    usable = [n for n in nodes if n.parking_pts and n.representative_pt is not None]
     if len(usable) < num_places:
-        raise ValueError(f"Only {len(usable)} counties have usable coordinates, but num_places={num_places}.")
+        raise ValueError(f"Only {len(usable)} ZIP nodes have usable coordinates, but num_places={num_places}.")
 
     if log_progress:
-        print(f"[find_route] Selecting top {num_places} counties by weighted SVI.", flush=True)
-    usable_sorted = sorted(usable, key=lambda n: n.weighted_svi, reverse=True)
-    selected = usable_sorted[:num_places]
+        print(f"[find_route] Selecting {num_places} ZIP stops inside {usable[0].county}, {usable[0].state}.", flush=True)
 
-    if start_county:
-        sk = start_county.strip().lower()
-        match = next((n for n in usable if n.county.lower() == sk), None)
-        if match is None:
-            raise ValueError(f"start_county='{start_county}' not found in the selected state.")
-        if match not in selected:
-            selected = selected[:-1] + [match]
-        selected = sorted(selected, key=lambda n: n.weighted_svi, reverse=True)
+    selected = select_zip_nodes(usable, num_places=num_places, use_clustering=use_clustering, log_progress=log_progress)
 
-    reps = [representative_point(n.parking_pts) for n in selected]
-    if any(r is None for r in reps):
-        raise ValueError("Some selected counties have no representative point.")
-    reps = [r for r in reps if r is not None]
+    if len(selected) < num_places:
+        raise ValueError(f"Only {len(selected)} ZIP nodes were selected, but num_places={num_places}.")
 
+    reps = [node.representative_pt for node in selected]
     parking_points: List[LatLon] = []
     for node in selected:
         parking_points.extend(node.parking_pts)
@@ -555,14 +1047,9 @@ def find_route(
     distance_provider.prepare(reps, log_progress=log_progress)
     parking_distance_provider.prepare(reps + parking_points, log_progress=log_progress)
 
-    if start_county:
-        start_idx = next(i for i, n in enumerate(selected) if n.county.lower() == start_county.strip().lower())
-    else:
-        start_idx = 0
-
     if log_progress:
         print("[find_route] Building route with nearest neighbor heuristic.", flush=True)
-    route = nearest_neighbor_route(reps, start_idx, distance_provider)
+    route = nearest_neighbor_route(reps, 0, distance_provider)
 
     if improve_2opt and len(route) >= 4:
         if log_progress:
@@ -571,20 +1058,23 @@ def find_route(
 
     chosen_pts = choose_parking_for_route(selected, route, reps, parking_distance_provider)
 
-    if log_progress:
-        print("[find_route] Route complete.", flush=True)
-
     rows = []
     for order, (idx, chosen) in enumerate(zip(route, chosen_pts), start=1):
         node = selected[idx]
         rows.append(
             {
                 "order": order,
-                "state": node.state,
+                "zip_code": node.zip_code,
                 "county": node.county,
-                "fips": node.fips,
+                "state": node.state,
+                "state_abbr": node.state_abbr,
                 "svi_overall": node.svi,
                 "weighted_svi": node.weighted_svi,
+                "hospitals": node.hospitals,
+                "nursing_homes": node.nursing_homes,
+                "public_health_departments": node.public_health_departments,
+                "pharmacies": node.pharmacies,
+                "resource_sites": node.resource_sites,
                 "parking_lat": chosen[0],
                 "parking_lon": chosen[1],
             }
@@ -603,12 +1093,8 @@ def find_route(
     return out
 
 
-def build_distance_provider(
-    mode: str,
-    osm_options: Optional[OSMOptions] = None,
-    log_fn=None,
-) -> DistanceProvider:
-    normalized = (mode or "haversine").strip().lower()
+def build_distance_provider(mode: str, osm_options: Optional[OSMOptions] = None, log_fn=None) -> DistanceProvider:
+    normalized = (mode or "osm").strip().lower()
     if normalized == "google":
         normalized = "osm"
         if log_fn:
@@ -620,22 +1106,6 @@ def build_distance_provider(
     if normalized == "haversine":
         return HaversineDistanceProvider()
     raise ValueError(f"Unsupported distance_mode '{mode}'. Use 'haversine' or 'osm'.")
-
-
-def _project_root() -> str:
-    return os.path.abspath(os.path.dirname(__file__))
-
-
-def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
-    if path_value is None:
-        return None
-    raw = os.path.expanduser(path_value)
-    abs_path = raw if os.path.isabs(raw) else os.path.join(_project_root(), raw)
-    abs_path = os.path.abspath(abs_path)
-    root = _project_root()
-    if abs_path != root and not abs_path.startswith(root + os.sep):
-        raise ValueError("Path must be within the project directory.")
-    return abs_path
 
 
 def _require_flask() -> None:
@@ -704,24 +1174,32 @@ def create_app() -> "Flask":
         return (lambda msg: print(msg, flush=True)) if enabled else (lambda msg: None)
 
     def _compute_route(payload: dict) -> Tuple[pd.DataFrame, dict]:
-        svi_csv = payload.get("svi_csv") or "SVI_2022_US_county.csv"
+        svi_csv = payload.get("svi_csv") or DEFAULT_SVI_CSV
+        zip_catalog_csv = payload.get("zip_catalog_csv") or DEFAULT_ZIP_CATALOG_CSV
+        zip_counts_csv = payload.get("zip_counts_csv") or DEFAULT_ZIP_COUNTS_CSV
         state = payload.get("state")
+        county = payload.get("county")
         num_places = payload.get("num_places")
-        if not state or num_places is None:
-            raise ValueError("state and num_places are required.")
+        if not state or not county or num_places is None:
+            raise ValueError("state, county, and num_places are required.")
+
+        svi_csv_path = _resolve_project_path(str(svi_csv)) if svi_csv else None
+        zip_catalog_path = _resolve_project_path(str(zip_catalog_csv))
+        zip_counts_path = _resolve_project_path(str(zip_counts_csv))
+        cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
+
+        if not zip_catalog_path:
+            raise ValueError("zip_catalog_csv must be within the project directory.")
+        if zip_counts_path and not os.path.exists(zip_counts_path) and not os.path.exists(zip_catalog_path):
+            raise ValueError(f"zip_counts_csv not found: {zip_counts_csv}")
 
         num_places = int(num_places)
         svi_weight = float(payload.get("svi_weight", 1.0))
-        start_county = payload.get("start_county")
         improve_2opt = _coerce_bool(payload.get("improve_2opt"), True)
+        use_clustering = _coerce_bool(payload.get("use_clustering"), False)
         use_centroid_fallback = _coerce_bool(payload.get("use_centroid_fallback"), True)
         sleep_s = float(payload.get("sleep_s", 0.0))
         log_progress = _coerce_bool(payload.get("log_progress"), False)
-
-        svi_csv_path = _resolve_project_path(str(svi_csv))
-        cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
-        if not svi_csv_path or not os.path.exists(svi_csv_path):
-            raise ValueError(f"svi_csv not found: {svi_csv}")
 
         osm_payload = payload.get("osm", {}) or {}
         osm_options = OSMOptions(
@@ -729,6 +1207,9 @@ def create_app() -> "Flask":
             buffer_km=float(osm_payload.get("buffer_km", 25.0)),
         )
         log_fn = _log_progress(log_progress)
+
+        if not os.path.exists(zip_catalog_path):
+            ensure_zip_catalog(zip_catalog_path, zip_counts_csv=zip_counts_path or DEFAULT_ZIP_COUNTS_CSV, log_fn=log_fn)
 
         distance_provider = build_distance_provider(
             mode=str(payload.get("distance_mode", "osm")),
@@ -741,21 +1222,22 @@ def create_app() -> "Flask":
             log_fn=log_fn,
         )
 
-        nodes = build_nodes(
+        nodes = build_zip_nodes(
             svi_csv=svi_csv_path,
+            zip_catalog_csv=zip_catalog_path,
             state_name=str(state),
+            county_name=str(county),
             svi_weight=svi_weight,
             sleep_s=sleep_s,
             use_centroid_if_missing=use_centroid_fallback,
             cache_csv=cache_csv_path,
             log_progress=log_progress,
         )
-
         route_df = find_route(
             nodes=nodes,
             num_places=num_places,
-            start_county=start_county,
             improve_2opt=improve_2opt,
+            use_clustering=use_clustering,
             distance_provider=distance_provider,
             parking_distance_provider=parking_distance_provider,
             log_progress=log_progress,
@@ -794,7 +1276,7 @@ def create_app() -> "Flask":
         try:
             route_df, summary = _compute_route(payload)
             csv_text = route_df.to_csv(index=False)
-            filename = f"route_{summary['num_stops']}_stops.csv"
+            filename = f"zip_route_{summary['num_stops']}_stops.csv"
             response = Response(csv_text, mimetype="text/csv")
             response.headers["Content-Disposition"] = f"attachment; filename={filename}"
             return response
@@ -824,15 +1306,23 @@ def create_app() -> "Flask":
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--svi_csv", required=True, help="County SVI CSV with STATE, COUNTY, FIPS, RPL_THEMES")
-    ap.add_argument("--state", required=True, help='Full state name, e.g. "Massachusetts"')
+    ap.add_argument("--svi_csv", default=DEFAULT_SVI_CSV, help="Legacy county SVI CSV path. ZIP routing now derives stop SVI from facility scarcity.")
+    ap.add_argument("--zip_catalog_csv", default=DEFAULT_ZIP_CATALOG_CSV, help="ZIP catalog CSV")
+    ap.add_argument("--zip_counts_csv", default=DEFAULT_ZIP_COUNTS_CSV, help="ZIP counts CSV used to build the ZIP catalog if needed")
+    ap.add_argument("--state", required=True, help='State name or abbreviation, e.g. "Massachusetts" or "MA"')
+    ap.add_argument("--county", required=True, help='County name, e.g. "Suffolk"')
     ap.add_argument("--num_places", type=int, required=True)
-    ap.add_argument("--svi_weight", type=float, default=1.0, help="Multiplier applied to RPL_THEMES before selecting counties")
-    ap.add_argument("--start_county", type=str, default=None)
+    ap.add_argument(
+        "--svi_weight",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to the derived ZIP vulnerability score before top-ZIP selection.",
+    )
     ap.add_argument("--no_2opt", action="store_true")
+    ap.add_argument("--use_clustering", action="store_true")
     ap.add_argument("--no_centroid_fallback", action="store_true")
     ap.add_argument("--sleep_s", type=float, default=1.0, help="Sleep between OSM queries to reduce rate limiting")
-    ap.add_argument("--log_progress", action="store_true", help="Print progress while building nodes and routing")
+    ap.add_argument("--log_progress", action="store_true", help="Print progress while building ZIP nodes and routing")
     ap.add_argument(
         "--distance_mode",
         type=str,
@@ -847,7 +1337,7 @@ def main() -> None:
         choices=["haversine", "osm", "auto", "google"],
         help="Distance source for parking selection. Haversine is the pragmatic default.",
     )
-    ap.add_argument("--cache_csv", type=str, default=None, help="Optional cache of per-county Parking Lots")
+    ap.add_argument("--cache_csv", type=str, default=None, help="Optional cache of per-ZIP parking lots")
     ap.add_argument("--out", type=str, default="route_output.csv")
     ap.add_argument("--html", type=str, default=None, help="Optional: write an interactive route map to this HTML file")
     args = ap.parse_args()
@@ -857,6 +1347,9 @@ def main() -> None:
 
     def _log(msg: str) -> None:
         print(msg, flush=True)
+
+    if not os.path.exists(args.zip_catalog_csv):
+        ensure_zip_catalog(args.zip_catalog_csv, zip_counts_csv=args.zip_counts_csv, log_fn=_log if args.log_progress else None)
 
     osm_options = OSMOptions(network_type="drive", buffer_km=25.0)
     distance_provider = build_distance_provider(args.distance_mode, osm_options=osm_options, log_fn=_log)
@@ -872,9 +1365,11 @@ def main() -> None:
         print(f"[distance] Route provider: {route_label}", flush=True)
         print(f"[parking_distance] Parking provider: {parking_label}", flush=True)
 
-    nodes = build_nodes(
+    nodes = build_zip_nodes(
         svi_csv=args.svi_csv,
+        zip_catalog_csv=args.zip_catalog_csv,
         state_name=args.state,
+        county_name=args.county,
         svi_weight=args.svi_weight,
         sleep_s=args.sleep_s,
         use_centroid_if_missing=not args.no_centroid_fallback,
@@ -885,8 +1380,8 @@ def main() -> None:
     route_df = find_route(
         nodes=nodes,
         num_places=args.num_places,
-        start_county=args.start_county,
         improve_2opt=not args.no_2opt,
+        use_clustering=args.use_clustering,
         distance_provider=distance_provider,
         parking_distance_provider=parking_distance_provider,
         log_progress=args.log_progress,

@@ -1,13 +1,45 @@
-# RouteRX Backend + CLI
+# RouteRX
 
-This project provides a CLI and a Flask API for computing county-level routes for a mobile clinic van.
+RouteRX computes ZIP-level mobile-clinic routes inside a single county. It uses ZIP-level facility counts to derive a vulnerability proxy for each ZIP, then routes between public parking locations.
 
-**Quick Start (CLI)**
+## Routing Model
+
+Inputs from the client:
+
+- `state`
+- `county` (required)
+- `num_places`
+- `svi_weight`
+- `improve_2opt`
+- `use_clustering`
+
+How routing works:
+
+1. Load ZIP rows for the requested `state + county` from `zip_facility_catalog.csv`. If the catalog does not exist yet, RouteRX builds it from `zip_facility_counts.csv` plus the facility source CSVs.
+2. Derive a ZIP vulnerability proxy from the facility-count columns. For each facility type, fewer facilities means a higher scarcity score relative to the other ZIPs in the same county. The ZIP score is the mean of those scarcity scores.
+3. For each ZIP, collect candidate public parking points from cached data, embedded catalog data, or OpenStreetMap. If no parking is found, RouteRX falls back to the ZIP representative point and then optionally the ZIP centroid.
+4. Select ZIP stops.
+   - Default: sort ZIPs on `weighted_svi = svi_weight * zip_svi` and take the top `num_places`.
+   - With clustering: cluster ZIPs geographically first, then take the top-vulnerability ZIP from each cluster.
+5. Order the selected ZIPs with nearest-neighbor routing.
+6. If `improve_2opt=true`, run 2-opt to shorten the route.
+7. For each selected ZIP, choose the parking lot that minimizes local detour relative to adjacent stops.
+
+Notes:
+
+- ZIP SVI in this workflow is a locally derived proxy based on facility scarcity, not the CDC county `RPL_THEMES` value.
+- The score is relative within the selected county, so values are best compared against other ZIPs in that same county.
+- As with the old county-level workflow, selection happens before routing. Distance only affects route order and parking-point choice after the top ZIPs are chosen.
+- Route ordering uses OSM road-network distance by default. Parking selection uses haversine by default because it is much faster.
+
+## CLI
+
+Basic example:
 
 ```bash
 python route_finder.py \
-  --svi_csv SVI_2022_US_county.csv \
   --state "Massachusetts" \
+  --county "Suffolk" \
   --num_places 8 \
   --svi_weight 1.0 \
   --cache_csv ma_cached.csv \
@@ -16,194 +48,176 @@ python route_finder.py \
   --log_progress
 ```
 
-**Quick Start (API)**
+Common flags:
+
+- `--svi_csv`: Legacy county SVI CSV path. Kept for compatibility but not used in ZIP scoring.
+- `--zip_catalog_csv`: ZIP catalog CSV. Default `zip_facility_catalog.csv`.
+- `--zip_counts_csv`: Source counts CSV used to build the ZIP catalog if needed. Default `zip_facility_counts.csv`.
+- `--state`: State name or abbreviation.
+- `--county`: County name. Required.
+- `--num_places`: Number of ZIP stops to select.
+- `--svi_weight`: Multiplier applied to the derived ZIP vulnerability score before selecting the top ZIPs.
+- `--use_clustering`: Spread selections geographically by choosing the top-vulnerability ZIP from each geographic cluster.
+- `--no_2opt`: Skip 2-opt route improvement.
+- `--no_centroid_fallback`: Disable ZIP centroid fallback when no parking lots are found.
+- `--distance_mode`: `haversine|osm|auto|google`. Default `osm`. `google` is accepted only as a compatibility alias for `osm`.
+- `--parking_distance_mode`: `haversine|osm|auto|google`. Default `haversine`.
+- `--cache_csv`: Optional per-ZIP parking cache.
+- `--out`: Output CSV path.
+- `--html`: Optional Folium map HTML path.
+- `--log_progress`: Print progress logs.
+
+## Flask API
+
+Run the server:
 
 ```bash
 flask --app route_finder:create_app run --host 0.0.0.0 --port 8000
 ```
 
-**Environment Variables**
+CORS:
 
-- `CORS_ALLOW_ORIGINS` controls CORS for `/api/*`. Default is `*`. Comma-separated list, for example `https://app.example.com,http://localhost:5173`.
+- `/api/*` responses include CORS headers.
+- Configure allowed origins with `CORS_ALLOW_ORIGINS`.
+- Example: `CORS_ALLOW_ORIGINS="http://localhost:5173,https://your-app.example"`
 
-**How Routing Works**
-
-1. **Selection (SVI-driven)**  
-   The script selects the top `num_places` counties by `weighted_svi = svi_weight * RPL_THEMES`.
-
-2. **Ordering (distance-driven)**  
-   It orders the selected counties using a nearest-neighbor heuristic and optional 2‑opt improvement.
-
-3. **Parking selection (local optimization)**  
-   For each county, it picks the parking point that minimizes distance to the previous and next stops.
-
-Distances are either haversine (fast, offline) or OpenStreetMap road-network shortest paths via OSMnx.
-
-**CLI Usage**
-
-Common flags:
-
-- `--svi_csv` (required): CSV with `STATE, COUNTY, FIPS, RPL_THEMES`.
-- `--state` (required): Full state name, e.g. `Massachusetts`.
-- `--num_places` (required): Number of counties to include.
-- `--svi_weight`: Scale SVI before selection (default `1.0`).
-- `--start_county`: Force-include and start route at this county.
-- `--no_2opt`: Disable 2-opt improvement.
-- `--no_centroid_fallback`: Disable centroid fallback if no parking lots found.
-- `--sleep_s`: Delay between OSM queries (default `1.0`).
-- `--cache_csv`: Cache parking lots to avoid re-querying OSM.
-- `--out`: Output CSV (default `route_output.csv`).
-- `--html`: Output map HTML (optional).
-- `--log_progress`: Print progress logs.
-- `--distance_mode`: `haversine|osm|auto|google` (default `osm`). `google` is accepted as a compatibility alias for `osm`.
-- `--parking_distance_mode`: `haversine|osm|auto|google` (default `haversine`).
-
-Notes:
-
-- `distance_mode=osm` uses an OpenStreetMap road network for county ordering and total route distance.
-- `parking_distance_mode=haversine` is the pragmatic default because OSM routing every parking candidate is much slower.
-
-**API Endpoints**
-
-`GET /api/health`
+### `GET /api/health`
 
 Response:
+
 ```json
 {"status":"ok"}
 ```
 
-`POST /api/route`
+### `POST /api/route`
 
-Request body fields:
+Client-style request:
 
-- `svi_csv` (string, required). CSV path relative to the project root, for example `MA_SVI_official.csv`.
-- `state` (string, required). Full state name in the CSV, for example `Massachusetts`.
-- `num_places` (int, required). Number of counties to include.
-- `svi_weight` (float, optional, default `1.0`). Scales the SVI for selection.
-- `start_county` (string, optional). Force-include county and start route there.
-- `improve_2opt` (bool, optional, default `true`). Apply 2-opt improvement.
-- `use_centroid_fallback` (bool, optional, default `true`). If no parking lots found, use county centroid.
-- `sleep_s` (float, optional, default `0.0`). Delay between OSM queries.
-- `cache_csv` (string, optional). Cache parking lots within project directory.
-- `distance_mode` (string, optional, default `osm`). `haversine` or `osm`.
-- `parking_distance_mode` (string, optional, default `haversine`). `haversine` or `osm`.
-- `osm` (object, optional). OpenStreetMap routing options. See below for fields.
-
-OSM options fields (inside `osm`):
-
-- `network_type` (string, default `drive`).
-- `buffer_km` (float, default `25.0`).
-
-Example request:
 ```json
 {
-  "svi_csv": "MA_SVI_official.csv",
   "state": "Massachusetts",
+  "county": "Suffolk",
   "num_places": 8,
   "svi_weight": 1.0,
-  "start_county": "Suffolk",
   "improve_2opt": true,
-  "use_centroid_fallback": true,
-  "sleep_s": 0.0,
-  "cache_csv": "ma_cached.csv",
-  "distance_mode": "osm",
-  "parking_distance_mode": "haversine",
-  "osm": {
-    "network_type": "drive",
-    "buffer_km": 25.0
-  }
+  "use_clustering": false
 }
 ```
 
-Example `curl` (similar to the CLI command shown above):
+Advanced optional fields:
+
+- `svi_csv`
+- `zip_catalog_csv`
+- `zip_counts_csv`
+- `cache_csv`
+- `sleep_s`
+- `log_progress`
+- `use_centroid_fallback`
+- `distance_mode`
+- `parking_distance_mode`
+- `osm`: `{ "network_type": "drive", "buffer_km": 25.0 }`
+
+`svi_overall` in the response is the derived ZIP-level vulnerability proxy.
+
+Example `curl`:
+
 ```bash
 curl -X POST http://localhost:8000/api/route \
   -H "Content-Type: application/json" \
   -d '{
-    "svi_csv": "SVI_2022_US_county.csv",
     "state": "Massachusetts",
+    "county": "Suffolk",
     "num_places": 8,
     "svi_weight": 1.0,
-    "cache_csv": "ma_cached.csv",
-    "distance_mode": "osm",
-    "parking_distance_mode": "haversine",
-    "log_progress": true
+    "improve_2opt": true,
+    "use_clustering": false
   }'
 ```
 
-Response:
+Response shape:
 
 ```json
 {
   "summary": {
     "num_stops": 8,
-    "total_km": 145.2,
-    "total_svi": 4.38,
-    "total_weighted_svi": 4.38
+    "total_km": 42.7,
+    "total_svi": 7.2,
+    "total_weighted_svi": 7.2
   },
   "stops": [
     {
       "order": 1,
-      "state": "Massachusetts",
+      "zip_code": "02111",
       "county": "Suffolk",
-      "fips": "25025",
-      "svi_overall": 0.9735,
-      "weighted_svi": 0.9735,
-      "parking_lat": 42.3557,
-      "parking_lon": -71.0562,
+      "state": "Massachusetts",
+      "state_abbr": "MA",
+      "svi_overall": 0.9,
+      "weighted_svi": 0.9,
+      "hospitals": 0,
+      "nursing_homes": 0,
+      "public_health_departments": 0,
+      "pharmacies": 1,
+      "resource_sites": 1,
+      "parking_lat": 42.3506,
+      "parking_lon": -71.0597,
       "leg_km_from_prev": 0.0,
       "total_km": 0.0,
-      "total_svi": 0.9735,
-      "total_weighted_svi": 0.9735
+      "total_svi": 0.9,
+      "total_weighted_svi": 0.9
     }
   ]
 }
 ```
 
-`POST /api/route.csv`
+For backward compatibility, the same payload is also exposed as `stats` and `route`.
 
-Returns the same data as `/api/route`, but as CSV (`text/csv`).
+### `POST /api/route.csv`
 
-Example `curl`:
+Returns the computed route as CSV.
+
 ```bash
 curl -X POST http://localhost:8000/api/route.csv \
   -H "Content-Type: application/json" \
   -d '{
-    "svi_csv": "SVI_2022_US_county.csv",
     "state": "Massachusetts",
+    "county": "Suffolk",
     "num_places": 8,
     "svi_weight": 1.0,
-    "cache_csv": "ma_cached.csv",
-    "distance_mode": "osm",
-    "parking_distance_mode": "haversine"
+    "improve_2opt": true,
+    "use_clustering": false
   }' > route_output.csv
 ```
 
-`POST /api/route/map`
+### `POST /api/route/map`
 
-Returns an interactive HTML map (`text/html`) using Folium. Requires `folium` installed.
+Returns a Folium HTML map.
 
-Example `curl`:
 ```bash
 curl -X POST http://localhost:8000/api/route/map \
   -H "Content-Type: application/json" \
   -d '{
-    "svi_csv": "SVI_2022_US_county.csv",
     "state": "Massachusetts",
+    "county": "Suffolk",
     "num_places": 8,
     "svi_weight": 1.0,
-    "cache_csv": "ma_cached.csv",
-    "distance_mode": "osm",
-    "parking_distance_mode": "haversine"
+    "improve_2opt": true,
+    "use_clustering": false
   }' > route_map.html
 ```
 
-`POST /api/route/preview`
+### `POST /api/route/preview`
 
-Returns only the summary totals for quick previews.
+Returns only the summary block.
 
-**Notes**
+## Test
 
-- Paths are restricted to the project directory for safety.
-- OSM road distances are cached in-memory per process; restart clears the cache.
-- `distance_mode=google` is treated as a compatibility alias for `osm` so older clients do not break immediately.
+```bash
+pytest -q
+```
+
+## Files
+
+- `route_finder.py`: core ZIP routing logic, CLI, and Flask API.
+- `app.py`: thin Flask entrypoint wrapper.
+- `zip_facility_counts.csv`: ZIP-level facility counts.
+- `zip_facility_catalog.csv`: generated ZIP catalog with representative coordinates.

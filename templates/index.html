@@ -11,7 +11,7 @@
     <div class="container">
         <header>
             <h1>RouteRX</h1>
-            <p class="subtitle">Route Finder Application</p>
+            <p class="subtitle">ZIP-Level Route Finder</p>
         </header>
 
         <main>
@@ -24,6 +24,11 @@
                     </div>
 
                     <div class="form-group">
+                        <label for="county">County *</label>
+                        <input type="text" id="county" name="county" placeholder="e.g., Suffolk" required>
+                    </div>
+
+                    <div class="form-group">
                         <label for="num_places">Number of Stops *</label>
                         <input type="number" id="num_places" name="num_places" min="1" max="100" value="15" required>
                     </div>
@@ -31,12 +36,7 @@
                     <div class="form-group">
                         <label for="svi_weight">SVI Weight</label>
                         <input type="number" id="svi_weight" name="svi_weight" step="0.1" value="1.0">
-                        <small>Higher values prioritize vulnerability</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="start_county">Starting County</label>
-                        <input type="text" id="start_county" name="start_county" placeholder="Optional">
+                        <small>Used to scale the derived ZIP vulnerability score before top ZIPs are selected.</small>
                     </div>
 
                     <div class="checkbox-group">
@@ -48,19 +48,7 @@
                             <input type="checkbox" name="use_clustering" id="use_clustering">
                             Use Clustering
                         </label>
-                        <label>
-                            <input type="checkbox" name="use_centroid_fallback" id="use_centroid_fallback" checked>
-                            Use Centroid Fallback
-                        </label>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="distance_mode">Distance Mode</label>
-                        <select id="distance_mode" name="distance_mode">
-                            <option value="haversine">Haversine (Fast)</option>
-                            <option value="osm">OpenStreetMap Road Network</option>
-                        </select>
-                        <small>OpenStreetMap uses road-network shortest paths and does not require an API key</small>
+                        <small>Cluster ZIPs geographically first, then choose the top-vulnerability ZIP from each cluster.</small>
                     </div>
 
                     <button type="submit" class="btn-primary">Generate Route</button>

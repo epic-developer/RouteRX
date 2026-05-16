@@ -37,6 +37,7 @@ function clearRoute() {
 
 // Display route on map
 function displayRouteOnMap(route) {
+    if (!route || route.length === 0) return;
     if (!map) initMap();
     
     clearRoute();
@@ -62,33 +63,18 @@ function displayRouteOnMap(route) {
             className: ''
         });
         
-        // Build popup content
-        let popupContent = `
+        const popupContent = `
             <div style="font-size:13px; max-width: 250px; max-height: 300px; overflow-y: auto;">
                 <strong>Stop ${stop.order}</strong><br>
+                ZIP ${stop.zip_code}<br>
                 ${stop.county}, ${stop.state}<br>
                 SVI: ${(stop.svi_overall * 100).toFixed(1)}%<br>
+                Resource sites: ${stop.resource_sites}<br>
                 Distance: ${stop.total_km.toFixed(1)} km
+            </div>
         `;
-        
-        // Add cluster information if available
-        if (stop.cluster_counties && stop.cluster_counties.length > 0) {
-            popupContent += `
-                <hr style="margin: 8px 0;">
-                <strong>Cluster Counties (${stop.cluster_count}):</strong><br>
-                <div style="font-size: 0.85em; color: #555; max-height: 150px; overflow-y: auto;">
-                    ${stop.cluster_counties.join('<br>')}
-                </div>
-            `;
-        }
-        
-        popupContent += '</div>';
-        
-        // Tooltip text
-        let tooltipText = `Stop ${stop.order}: ${stop.county}`;
-        if (stop.cluster_count) {
-            tooltipText += ` (Cluster of ${stop.cluster_count})`;
-        }
+
+        const tooltipText = `Stop ${stop.order}: ZIP ${stop.zip_code}`;
         
         const marker = L.marker([stop.parking_lat, stop.parking_lon], { icon })
             .bindPopup(popupContent)
@@ -101,7 +87,7 @@ function displayRouteOnMap(route) {
     // Fit map to route bounds
     map.fitBounds(routeLayer.getBounds(), { padding: [50, 50] });
     
-    console.log('[DEBUG] Route displayed on map with cluster info');
+    console.log('[DEBUG] Route displayed on map');
 }
 
 // Form submission
@@ -118,13 +104,11 @@ if (form) {
         const formData = new FormData(form);
         const payload = {
             state: formData.get('state'),
+            county: formData.get('county'),
             num_places: parseInt(formData.get('num_places')),
             svi_weight: parseFloat(formData.get('svi_weight')),
-            start_county: formData.get('start_county') || null,
             improve_2opt: form.elements['improve_2opt']?.checked ?? true,
             use_clustering: form.elements['use_clustering']?.checked ?? false,
-            use_centroid_fallback: form.elements['use_centroid_fallback']?.checked ?? true,
-            distance_mode: formData.get('distance_mode'),
         };
         
         console.log('[DEBUG] Payload:', payload);
@@ -147,8 +131,8 @@ if (form) {
             console.log('[DEBUG] Route data received:', data);
             
             displayResults(data);
-            displayRouteOnMap(data.route);
-            lastRoute = data.route;
+            displayRouteOnMap(data.stops || data.route || []);
+            lastRoute = data.stops || data.route || [];
             
         } catch (error) {
             console.error('[ERROR]', error);
@@ -160,7 +144,7 @@ if (form) {
 }
 
 function displayResults(data) {
-    const { stats, route } = data;
+    const stats = data.summary || data.stats;
     
     if (!resultsSection) {
         console.error('[ERROR] Results section not found');
@@ -195,10 +179,32 @@ if (downloadBtn) {
         }
         
         const csv = [
-            ['Order', 'County', 'State', 'SVI', 'Distance (km)', 'Total (km)', 'Lat', 'Lon'],
+            [
+                'Order',
+                'ZIP Code',
+                'County',
+                'State',
+                'SVI',
+                'Weighted SVI',
+                'Hospitals',
+                'Nursing Homes',
+                'Public Health Departments',
+                'Pharmacies',
+                'Resource Sites',
+                'Distance (km)',
+                'Total (km)',
+                'Lat',
+                'Lon'
+            ],
             ...lastRoute.map(s => [
-                s.order, s.county, s.state,
+                s.order, s.zip_code, s.county, s.state,
                 (s.svi_overall * 100).toFixed(2) + '%',
+                s.weighted_svi.toFixed(4),
+                s.hospitals,
+                s.nursing_homes,
+                s.public_health_departments,
+                s.pharmacies,
+                s.resource_sites,
                 s.leg_km_from_prev.toFixed(2),
                 s.total_km.toFixed(2),
                 s.parking_lat.toFixed(6),
@@ -237,9 +243,11 @@ function generateDetailsHTML(route) {
     const rows = route.map(stop => `
         <tr>
             <td>${stop.order}</td>
+            <td>${stop.zip_code}</td>
             <td>${stop.county}</td>
             <td>${stop.state}</td>
             <td>${(stop.svi_overall * 100).toFixed(2)}%</td>
+            <td>${stop.resource_sites}</td>
             <td>${stop.leg_km_from_prev.toFixed(2)}</td>
             <td>${stop.total_km.toFixed(2)}</td>
             <td>${stop.parking_lat.toFixed(4)}, ${stop.parking_lon.toFixed(4)}</td>
@@ -267,9 +275,11 @@ function generateDetailsHTML(route) {
                 <thead>
                     <tr>
                         <th>Order</th>
+                        <th>ZIP Code</th>
                         <th>County</th>
                         <th>State</th>
                         <th>SVI</th>
+                        <th>Resource Sites</th>
                         <th>Distance from Prev (km)</th>
                         <th>Total Distance (km)</th>
                         <th>Coordinates</th>

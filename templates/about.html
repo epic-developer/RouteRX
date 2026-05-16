@@ -11,17 +11,17 @@
             <h2>What is RouteRX?</h2>
             <p>
                 RouteRX is a web-based route optimization tool designed for healthcare organizations 
-                conducting outreach programs in underserved communities. The application uses the 
-                CDC's Social Vulnerability Index (SVI) to identify and prioritize areas most in need 
-                of healthcare services.
+                conducting outreach programs in underserved communities. The application uses 
+                ZIP-level facility scarcity to derive local vulnerability scores and identify ZIP codes
+                inside a target county and route a mobile unit between public parking locations.
             </p>
         </section>
 
         <section class="about-section">
             <h2>How It Works</h2>
             <ol class="about-list">
-                <li><strong>Data Collection:</strong> SVI data from CDC/ATSDR provides vulnerability metrics for US counties</li>
-                <li><strong>Selection:</strong> Counties are ranked by vulnerability and geographic constraints</li>
+                <li><strong>Data Collection:</strong> Facility data is aggregated by ZIP code and used to build a local vulnerability proxy</li>
+                <li><strong>Selection:</strong> ZIP codes are ranked by derived vulnerability, with optional geographic clustering before the final ZIPs are chosen</li>
                 <li><strong>Optimization:</strong> Routes are optimized using nearest-neighbor and 2-opt algorithms</li>
                 <li><strong>Visualization:</strong> Results displayed on interactive maps with detailed statistics</li>
             </ol>
@@ -62,7 +62,7 @@
                 <div class="feature-card">
                     <div class="feature-icon">🔧</div>
                     <h3>Flexible Options</h3>
-                    <p>Customize SVI weights, starting points, and distance calculations</p>
+                    <p>Customize vulnerability weighting and route refinement</p>
                 </div>
             </div>
         </section>
@@ -81,9 +81,10 @@
             <h2>Usage Tips</h2>
             <ul class="about-list">
                 <li>Use full state names (e.g., "Massachusetts" not "MA")</li>
+                <li>County is required because ZIP selection happens inside one county at a time</li>
                 <li>Start with 10-15 stops for optimal performance</li>
                 <li>Use Haversine for quick estimates and OSM for road-network distances</li>
-                <li>Higher SVI weights prioritize vulnerable areas over distance efficiency</li>
+                <li>Use clustering when you want one selected ZIP from each geographic region instead of simply taking the top vulnerable ZIPs overall</li>
             </ul>
         </section>
 

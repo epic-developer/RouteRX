@@ -12,7 +12,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import route_finder as rf
 
 
-SAMPLE_CSV = os.path.join(os.path.dirname(__file__), "data", "sample_svi.csv")
+SAMPLE_SVI_CSV = os.path.join(os.path.dirname(__file__), "data", "sample_svi.csv")
+SAMPLE_ZIP_CATALOG_CSV = os.path.join(os.path.dirname(__file__), "data", "sample_zip_catalog.csv")
 
 
 def test_parse_latlon_list():
@@ -29,61 +30,226 @@ def test_representative_point():
     assert rep in pts
 
 
-def test_build_nodes_from_sample_csv():
-    # Build nodes from a small local CSV to avoid network calls.
-    nodes = rf.build_nodes(
-        svi_csv=SAMPLE_CSV,
+def test_build_zip_nodes_from_sample_csv():
+    # Build ZIP nodes from local fixture data so the test stays offline and deterministic.
+    nodes = rf.build_zip_nodes(
+        svi_csv=SAMPLE_SVI_CSV,
+        zip_catalog_csv=SAMPLE_ZIP_CATALOG_CSV,
         state_name="Massachusetts",
+        county_name="Suffolk",
         svi_weight=1.0,
         sleep_s=0.0,
         use_centroid_if_missing=False,
         cache_csv=None,
     )
-    assert len(nodes) == 3
-    assert all(n.parking_pts for n in nodes)
-    assert {n.county for n in nodes} == {"Suffolk", "Essex", "Berkshire"}
+    assert len(nodes) == 4
+    assert {node.zip_code for node in nodes} == {"02108", "02109", "02110", "02111"}
+    assert all(node.parking_pts for node in nodes)
+    assert all(node.county == "Suffolk" for node in nodes)
+    score_by_zip = {node.zip_code: node.svi for node in nodes}
+    assert score_by_zip["02111"] > score_by_zip["02110"] > score_by_zip["02109"] > score_by_zip["02108"]
 
 
 def test_find_route_basic():
-    # Minimal routing test using in-memory nodes and haversine distances.
+    # The selector should choose the highest-vulnerability ZIPs, then order them by distance.
     nodes = [
-        rf.CountyNode(
+        rf.ZipNode(
             state="Massachusetts",
+            state_abbr="MA",
             county="Suffolk",
-            fips="25025",
+            zip_code="02111",
             svi=0.9,
             weighted_svi=0.9,
-            parking_pts=[(42.3557, -71.0562)],
+            hospitals=0,
+            nursing_homes=0,
+            public_health_departments=0,
+            pharmacies=1,
+            resource_sites=1,
+            representative_pt=(42.3505, -71.0596),
+            parking_pts=[(42.3506, -71.0597)],
         ),
-        rf.CountyNode(
+        rf.ZipNode(
             state="Massachusetts",
-            county="Essex",
-            fips="25009",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="02110",
             svi=0.5,
             weighted_svi=0.5,
-            parking_pts=[(42.5584, -70.8790)],
+            hospitals=0,
+            nursing_homes=0,
+            public_health_departments=1,
+            pharmacies=1,
+            resource_sites=2,
+            representative_pt=(42.3588, -71.0518),
+            parking_pts=[(42.3589, -71.0519)],
         ),
-        rf.CountyNode(
+        rf.ZipNode(
             state="Massachusetts",
-            county="Berkshire",
-            fips="25003",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="02108",
             svi=0.2,
             weighted_svi=0.2,
-            parking_pts=[(42.3732, -73.3284)],
+            hospitals=1,
+            nursing_homes=0,
+            public_health_departments=1,
+            pharmacies=3,
+            resource_sites=5,
+            representative_pt=(42.3570, -71.0637),
+            parking_pts=[(42.3571, -71.0638)],
         ),
     ]
 
-    df = rf.find_route(nodes=nodes, num_places=2, start_county=None, improve_2opt=False)
+    df = rf.find_route(
+        nodes=nodes,
+        num_places=2,
+        improve_2opt=False,
+        use_clustering=False,
+        distance_provider=rf.HaversineDistanceProvider(),
+        parking_distance_provider=rf.HaversineDistanceProvider(),
+    )
 
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
     assert df["order"].tolist() == [1, 2]
+    assert df["zip_code"].tolist() == ["02111", "02110"]
     assert df["total_km"].iloc[-1] >= 0
+
+
+def test_svi_weight_scales_vulnerability_scores():
+    nodes = [
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="00001",
+            svi=0.25,
+            weighted_svi=0.25,
+            hospitals=1,
+            nursing_homes=1,
+            public_health_departments=1,
+            pharmacies=1,
+            resource_sites=4,
+            representative_pt=(42.0, -71.0),
+            parking_pts=[(42.0, -71.0)],
+        ),
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="00002",
+            svi=0.75,
+            weighted_svi=1.50,
+            hospitals=0,
+            nursing_homes=0,
+            public_health_departments=0,
+            pharmacies=1,
+            resource_sites=1,
+            representative_pt=(42.01, -71.0),
+            parking_pts=[(42.01, -71.0)],
+        ),
+    ]
+
+    df = rf.find_route(
+        nodes=nodes,
+        num_places=1,
+        improve_2opt=False,
+        use_clustering=False,
+        distance_provider=rf.HaversineDistanceProvider(),
+        parking_distance_provider=rf.HaversineDistanceProvider(),
+    )
+
+    assert df["zip_code"].tolist() == ["00002"]
+
+
+def test_clustering_selects_top_zip_in_each_region():
+    nodes = [
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="A1",
+            svi=0.95,
+            weighted_svi=0.95,
+            hospitals=0,
+            nursing_homes=0,
+            public_health_departments=0,
+            pharmacies=0,
+            resource_sites=0,
+            representative_pt=(42.0000, -71.0000),
+            parking_pts=[(42.0000, -71.0000)],
+        ),
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="A2",
+            svi=0.90,
+            weighted_svi=0.90,
+            hospitals=0,
+            nursing_homes=0,
+            public_health_departments=0,
+            pharmacies=1,
+            resource_sites=1,
+            representative_pt=(42.0005, -71.0000),
+            parking_pts=[(42.0005, -71.0000)],
+        ),
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="B1",
+            svi=0.70,
+            weighted_svi=0.70,
+            hospitals=1,
+            nursing_homes=0,
+            public_health_departments=0,
+            pharmacies=1,
+            resource_sites=2,
+            representative_pt=(42.1000, -71.0000),
+            parking_pts=[(42.1000, -71.0000)],
+        ),
+        rf.ZipNode(
+            state="Massachusetts",
+            state_abbr="MA",
+            county="Suffolk",
+            zip_code="B2",
+            svi=0.60,
+            weighted_svi=0.60,
+            hospitals=1,
+            nursing_homes=1,
+            public_health_departments=0,
+            pharmacies=1,
+            resource_sites=3,
+            representative_pt=(42.1005, -71.0000),
+            parking_pts=[(42.1005, -71.0000)],
+        ),
+    ]
+
+    unclustered = rf.find_route(
+        nodes=nodes,
+        num_places=2,
+        improve_2opt=False,
+        use_clustering=False,
+        distance_provider=rf.HaversineDistanceProvider(),
+        parking_distance_provider=rf.HaversineDistanceProvider(),
+    )
+    clustered = rf.find_route(
+        nodes=nodes,
+        num_places=2,
+        improve_2opt=False,
+        use_clustering=True,
+        distance_provider=rf.HaversineDistanceProvider(),
+        parking_distance_provider=rf.HaversineDistanceProvider(),
+    )
+
+    assert set(unclustered["zip_code"]) == {"A1", "A2"}
+    assert set(clustered["zip_code"]) == {"A1", "B1"}
 
 
 @pytest.mark.skipif(rf.Flask is None, reason="Flask is not installed")
 def test_api_route_haversine(monkeypatch):
-    # Exercise Flask API with haversine distance mode and verify CORS headers.
+    # Exercise the Flask API with local ZIP fixtures and verify CORS headers.
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:5173")
     app = rf.create_app()
     client = app.test_client()
@@ -94,7 +260,9 @@ def test_api_route_haversine(monkeypatch):
 
     payload = {
         "svi_csv": "tests/data/sample_svi.csv",
+        "zip_catalog_csv": "tests/data/sample_zip_catalog.csv",
         "state": "Massachusetts",
+        "county": "Suffolk",
         "num_places": 2,
         "distance_mode": "haversine",
         "parking_distance_mode": "haversine",
@@ -104,12 +272,13 @@ def test_api_route_haversine(monkeypatch):
     data = resp.get_json()
     assert data["summary"]["num_stops"] == 2
     assert len(data["stops"]) == 2
+    assert data["stops"][0]["zip_code"] == "02111"
     assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"
 
     csv_resp = client.post("/api/route.csv", json=payload)
     assert csv_resp.status_code == 200
     assert "text/csv" in (csv_resp.headers.get("Content-Type") or "")
-    assert "order,state,county" in csv_resp.get_data(as_text=True)
+    assert "order,zip_code,county,state" in csv_resp.get_data(as_text=True)
 
     preview_resp = client.post("/api/route/preview", json=payload)
     assert preview_resp.status_code == 200
@@ -125,7 +294,9 @@ def test_api_route_map(monkeypatch):
 
     payload = {
         "svi_csv": "tests/data/sample_svi.csv",
+        "zip_catalog_csv": "tests/data/sample_zip_catalog.csv",
         "state": "Massachusetts",
+        "county": "Suffolk",
         "num_places": 2,
         "distance_mode": "haversine",
         "parking_distance_mode": "haversine",
