@@ -115,7 +115,7 @@ Advanced optional fields:
 - `use_centroid_fallback`
 - `distance_mode`
 - `parking_distance_mode`
-- `osm`: `{ "network_type": "drive", "buffer_km": 25.0 }`
+- `osm`: `{ "network_type": "drive", "buffer_km": 5.0 }`
 
 `svi_overall` in the response is the derived ZIP-level vulnerability proxy.
 

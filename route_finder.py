@@ -48,6 +48,7 @@ DEFAULT_HOSPITALS_CSV = "Hospitals_RAPT_6238935059120575774.csv"
 DEFAULT_NURSING_HOMES_CSV = "Nursing_Homes_RAPT_4878197144364307278.csv"
 DEFAULT_PUBLIC_HEALTH_CSV = "Public_Health_Departments_HIFLD_-4601558331780057158.csv"
 DEFAULT_PHARMACIES_CSV = "RxOpen_041323_Pharmacies_-1189248154250082350.csv"
+DEFAULT_OSM_BUFFER_KM = 5.0
 FACILITY_COLUMNS = [
     "Hospitals",
     "Nursing Homes",
@@ -115,7 +116,7 @@ LEADING_ZERO_STATE_ABBRS = {"CT", "DC", "DE", "MA", "ME", "NH", "NJ", "PR", "RI"
 @dataclass(frozen=True)
 class OSMOptions:
     network_type: str = "drive"
-    buffer_km: float = 25.0
+    buffer_km: float = DEFAULT_OSM_BUFFER_KM
 
 
 @dataclass(frozen=True)
@@ -394,11 +395,15 @@ class OSMRouteDistanceProvider(DistanceProvider):
         south = min_lat - buffer_lat
         east = max_lon + buffer_lon
         west = min_lon - buffer_lon
-        return (north, south, east, west)
+
+        # OSMnx 2.x expects bbox order: (left, bottom, right, top) i.e.
+        # (west, south, east, north). Returning any other order can explode
+        # the effective query area and trigger Overpass OOM/timeouts.
+        return (west, south, east, north)
 
     @staticmethod
     def _bbox_contains(bbox: Tuple[float, float, float, float], points: Sequence[LatLon]) -> bool:
-        north, south, east, west = bbox
+        west, south, east, north = bbox
         return all(south <= lat <= north and west <= lon <= east for lat, lon in points)
 
     @staticmethod
@@ -407,10 +412,10 @@ class OSMRouteDistanceProvider(DistanceProvider):
         b: Tuple[float, float, float, float],
     ) -> Tuple[float, float, float, float]:
         return (
-            max(a[0], b[0]),
+            min(a[0], b[0]),
             min(a[1], b[1]),
             max(a[2], b[2]),
-            min(a[3], b[3]),
+            max(a[3], b[3]),
         )
 
     def _cache_key(self, a: LatLon, b: LatLon) -> Tuple[float, float, float, float, str]:
@@ -1331,7 +1336,7 @@ def create_app() -> "Flask":
         osm_payload = payload.get("osm", {}) or {}
         osm_options = OSMOptions(
             network_type=str(osm_payload.get("network_type", "drive")),
-            buffer_km=float(osm_payload.get("buffer_km", 25.0)),
+            buffer_km=float(osm_payload.get("buffer_km", DEFAULT_OSM_BUFFER_KM)),
         )
         log_fn = _log_progress(log_progress)
 
@@ -1478,7 +1483,7 @@ def main() -> None:
     if not os.path.exists(args.zip_catalog_csv):
         ensure_zip_catalog(args.zip_catalog_csv, zip_counts_csv=args.zip_counts_csv, log_fn=_log if args.log_progress else None)
 
-    osm_options = OSMOptions(network_type="drive", buffer_km=25.0)
+    osm_options = OSMOptions(network_type="drive", buffer_km=DEFAULT_OSM_BUFFER_KM)
     distance_provider = build_distance_provider(args.distance_mode, osm_options=osm_options, log_fn=_log)
     parking_distance_provider = build_distance_provider(
         args.parking_distance_mode,

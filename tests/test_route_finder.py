@@ -36,6 +36,20 @@ def test_representative_point():
     assert rep in pts
 
 
+def test_osm_bbox_order_matches_osmnx_expectation():
+    assert rf.DEFAULT_OSM_BUFFER_KM == 5.0
+    assert rf.OSMOptions().buffer_km == rf.DEFAULT_OSM_BUFFER_KM
+
+    provider = rf.OSMRouteDistanceProvider(options=rf.OSMOptions(buffer_km=5.0), log_fn=lambda _: None)
+    bbox = provider._expanded_bbox([(42.352, -71.069), (42.341, -71.078)])
+    left, bottom, right, top = bbox
+
+    assert left < right
+    assert bottom < top
+    assert left < -71.07 < right
+    assert bottom < 42.35 < top
+
+
 def test_build_zip_nodes_from_sample_csv():
     # Build ZIP nodes from local fixture data so the test stays offline and deterministic.
     nodes = rf.build_zip_nodes(
