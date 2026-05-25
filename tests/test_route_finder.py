@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -288,6 +290,7 @@ def test_api_route_haversine(monkeypatch):
         "num_places": 2,
         "distance_mode": "haversine",
         "parking_distance_mode": "haversine",
+        "use_result_cache": False,
     }
     resp = client.post("/api/route", json=payload, headers={"Origin": "http://localhost:5173"})
     assert resp.status_code == 200
@@ -296,6 +299,8 @@ def test_api_route_haversine(monkeypatch):
     assert len(data["stops"]) == 2
     assert data["stops"][0]["zip_code"] == "02111"
     assert data["stops"][0]["parking_source"] == "osm"
+    assert data["cache_hit"] is False
+    assert resp.headers.get("X-Route-Cache") == "MISS"
     assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"
 
     csv_resp = client.post("/api/route.csv", json=payload)
@@ -308,6 +313,7 @@ def test_api_route_haversine(monkeypatch):
     assert preview_resp.status_code == 200
     preview = preview_resp.get_json()
     assert preview["summary"]["num_stops"] == 2
+    assert preview["cache_hit"] is False
 
 
 @pytest.mark.skipif(rf.folium is None, reason="folium is not installed")
@@ -324,7 +330,53 @@ def test_api_route_map(monkeypatch):
         "num_places": 2,
         "distance_mode": "haversine",
         "parking_distance_mode": "haversine",
+        "use_result_cache": False,
     }
     resp = client.post("/api/route/map", json=payload)
     assert resp.status_code == 200
     assert "text/html" in (resp.headers.get("Content-Type") or "")
+    assert resp.headers.get("X-Route-Cache") == "MISS"
+
+
+@pytest.mark.skipif(rf.Flask is None, reason="Flask is not installed")
+def test_api_route_result_cache(monkeypatch):
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://localhost:5173")
+    app = rf.create_app()
+    client = app.test_client()
+
+    cache_dir = tempfile.mkdtemp(dir=PROJECT_ROOT)
+    rel_cache_dir = os.path.relpath(cache_dir, PROJECT_ROOT)
+    original_find_route = rf.find_route
+    calls = {"count": 0}
+
+    def counting_find_route(*args, **kwargs):
+        calls["count"] += 1
+        return original_find_route(*args, **kwargs)
+
+    monkeypatch.setattr(rf, "find_route", counting_find_route)
+
+    payload = {
+        "svi_csv": "tests/data/sample_svi.csv",
+        "zip_catalog_csv": "tests/data/sample_zip_catalog.csv",
+        "state": "Massachusetts",
+        "county": "Suffolk",
+        "num_places": 2,
+        "distance_mode": "haversine",
+        "parking_distance_mode": "haversine",
+        "result_cache_dir": rel_cache_dir,
+    }
+
+    try:
+        first = client.post("/api/route", json=payload)
+        assert first.status_code == 200
+        assert first.get_json()["cache_hit"] is False
+        assert first.headers.get("X-Route-Cache") == "MISS"
+        assert calls["count"] == 1
+
+        second = client.post("/api/route", json=payload)
+        assert second.status_code == 200
+        assert second.get_json()["cache_hit"] is True
+        assert second.headers.get("X-Route-Cache") == "HIT"
+        assert calls["count"] == 1
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)

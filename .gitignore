@@ -27,3 +27,4 @@ dist/
 .coverage
 htmlcov/
 cache/
+.route_result_cache/

@@ -63,6 +63,8 @@ Common flags:
 - `--distance_mode`: `haversine|osm|auto|google`. Default `osm`. `google` is accepted only as a compatibility alias for `osm`.
 - `--parking_distance_mode`: `haversine|osm|auto|google`. Default `haversine`.
 - `--cache_csv`: Optional per-ZIP parking cache.
+- `--result_cache_dir`: Directory for cached route results. Default `.route_result_cache`.
+- `--no_result_cache`: Disable route-result caching.
 - `--out`: Output CSV path.
 - `--html`: Optional Folium map HTML path.
 - `--log_progress`: Print progress logs.
@@ -115,6 +117,8 @@ Advanced optional fields:
 - `use_centroid_fallback`
 - `distance_mode`
 - `parking_distance_mode`
+- `use_result_cache`
+- `result_cache_dir`
 - `osm`: `{ "network_type": "drive", "buffer_km": 5.0 }`
 
 `svi_overall` in the response is the derived ZIP-level vulnerability proxy.
@@ -144,6 +148,7 @@ Response shape:
     "total_svi": 7.2,
     "total_weighted_svi": 7.2
   },
+  "cache_hit": false,
   "stops": [
     {
       "order": 1,
@@ -171,6 +176,8 @@ Response shape:
 ```
 
 For backward compatibility, the same payload is also exposed as `stats` and `route`.
+
+Route responses also include the `X-Route-Cache` response header with either `HIT` or `MISS`.
 
 `parking_source` is one of:
 - `osm`: a real parking candidate returned by OpenStreetMap

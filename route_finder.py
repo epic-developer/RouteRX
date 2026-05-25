@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import os
 import time
@@ -49,6 +51,8 @@ DEFAULT_NURSING_HOMES_CSV = "Nursing_Homes_RAPT_4878197144364307278.csv"
 DEFAULT_PUBLIC_HEALTH_CSV = "Public_Health_Departments_HIFLD_-4601558331780057158.csv"
 DEFAULT_PHARMACIES_CSV = "RxOpen_041323_Pharmacies_-1189248154250082350.csv"
 DEFAULT_OSM_BUFFER_KM = 5.0
+DEFAULT_RESULT_CACHE_DIR = ".route_result_cache"
+ROUTE_RESULT_CACHE_VERSION = "zip-route-v1"
 FACILITY_COLUMNS = [
     "Hospitals",
     "Nursing Homes",
@@ -757,6 +761,71 @@ def _resolve_project_path(path_value: Optional[str]) -> Optional[str]:
     return abs_path
 
 
+def _project_relative_path(path_value: Optional[str]) -> Optional[str]:
+    if path_value is None:
+        return None
+    root = _project_root()
+    abs_path = os.path.abspath(path_value)
+    if abs_path == root:
+        return "."
+    if abs_path.startswith(root + os.sep):
+        return os.path.relpath(abs_path, root)
+    return abs_path
+
+
+def _file_signature(path_value: Optional[str]) -> Optional[dict]:
+    if not path_value:
+        return None
+
+    signature = {"path": _project_relative_path(path_value)}
+    if not os.path.exists(path_value):
+        signature["exists"] = False
+        return signature
+
+    stat = os.stat(path_value)
+    signature.update({"exists": True, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    return signature
+
+
+def _build_result_cache_key(config: dict) -> str:
+    raw = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _result_cache_path(cache_dir: str, cache_key: str) -> str:
+    return os.path.join(cache_dir, f"{cache_key}.json")
+
+
+def load_route_result_cache(cache_dir: str, cache_key: str) -> Optional[pd.DataFrame]:
+    cache_path = _result_cache_path(cache_dir, cache_key)
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return None
+    return pd.DataFrame(rows)
+
+
+def save_route_result_cache(cache_dir: str, cache_key: str, route_df: pd.DataFrame) -> None:
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = _result_cache_path(cache_dir, cache_key)
+    tmp_path = cache_path + ".tmp"
+    payload = {
+        "created_at": int(time.time()),
+        "rows": route_df.to_dict(orient="records"),
+    }
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"), ensure_ascii=True)
+    os.replace(tmp_path, cache_path)
+
+
 def build_zip_catalog(
     zip_counts_csv: str,
     output_csv: str,
@@ -1271,6 +1340,119 @@ def _coerce_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def compute_route_request(payload: dict, log_fn=None) -> Tuple[pd.DataFrame, dict, bool]:
+    svi_csv = payload.get("svi_csv") or DEFAULT_SVI_CSV
+    zip_catalog_csv = payload.get("zip_catalog_csv") or DEFAULT_ZIP_CATALOG_CSV
+    zip_counts_csv = payload.get("zip_counts_csv") or DEFAULT_ZIP_COUNTS_CSV
+    state = payload.get("state")
+    county = payload.get("county")
+    num_places = payload.get("num_places")
+    if not state or not county or num_places is None:
+        raise ValueError("state, county, and num_places are required.")
+
+    svi_csv_path = _resolve_project_path(str(svi_csv)) if svi_csv else None
+    zip_catalog_path = _resolve_project_path(str(zip_catalog_csv))
+    zip_counts_path = _resolve_project_path(str(zip_counts_csv))
+    cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
+    result_cache_dir = _resolve_project_path(payload.get("result_cache_dir") or DEFAULT_RESULT_CACHE_DIR)
+
+    if not zip_catalog_path:
+        raise ValueError("zip_catalog_csv must be within the project directory.")
+    if not result_cache_dir:
+        raise ValueError("result_cache_dir must be within the project directory.")
+    if zip_counts_path and not os.path.exists(zip_counts_path) and not os.path.exists(zip_catalog_path):
+        raise ValueError(f"zip_counts_csv not found: {zip_counts_csv}")
+
+    num_places = int(num_places)
+    svi_weight = float(payload.get("svi_weight", 1.0))
+    improve_2opt = _coerce_bool(payload.get("improve_2opt"), True)
+    use_clustering = _coerce_bool(payload.get("use_clustering"), False)
+    use_centroid_fallback = _coerce_bool(payload.get("use_centroid_fallback"), True)
+    use_result_cache = _coerce_bool(payload.get("use_result_cache"), True)
+    sleep_s = float(payload.get("sleep_s", 0.0))
+    log_progress = _coerce_bool(payload.get("log_progress"), False)
+    active_log = log_fn or ((lambda msg: print(msg, flush=True)) if log_progress else (lambda msg: None))
+
+    osm_payload = payload.get("osm", {}) or {}
+    osm_options = OSMOptions(
+        network_type=str(osm_payload.get("network_type", "drive")),
+        buffer_km=float(osm_payload.get("buffer_km", DEFAULT_OSM_BUFFER_KM)),
+    )
+
+    if not os.path.exists(zip_catalog_path):
+        ensure_zip_catalog(zip_catalog_path, zip_counts_csv=zip_counts_path or DEFAULT_ZIP_COUNTS_CSV, log_fn=active_log)
+
+    cache_key = ""
+    if use_result_cache:
+        cache_config = {
+            "version": ROUTE_RESULT_CACHE_VERSION,
+            "state": canonical_state(str(state))[1],
+            "county": normalize_county_name(str(county)),
+            "num_places": num_places,
+            "svi_weight": svi_weight,
+            "improve_2opt": improve_2opt,
+            "use_clustering": use_clustering,
+            "use_centroid_fallback": use_centroid_fallback,
+            "distance_mode": str(payload.get("distance_mode", "osm")).strip().lower(),
+            "parking_distance_mode": str(payload.get("parking_distance_mode", "haversine")).strip().lower(),
+            "osm": {
+                "network_type": osm_options.network_type,
+                "buffer_km": osm_options.buffer_km,
+            },
+            "files": {
+                "zip_catalog": _file_signature(zip_catalog_path),
+                "parking_cache": _file_signature(cache_csv_path),
+            },
+        }
+        cache_key = _build_result_cache_key(cache_config)
+        cached_route_df = load_route_result_cache(result_cache_dir, cache_key)
+        if cached_route_df is not None:
+            if log_progress:
+                active_log(f"[result_cache] HIT {cache_key[:12]}")
+            return cached_route_df, _route_summary(cached_route_df), True
+        if log_progress:
+            active_log(f"[result_cache] MISS {cache_key[:12]}")
+
+    distance_provider = build_distance_provider(
+        mode=str(payload.get("distance_mode", "osm")),
+        osm_options=osm_options,
+        log_fn=active_log,
+    )
+    parking_distance_provider = build_distance_provider(
+        mode=str(payload.get("parking_distance_mode", "haversine")),
+        osm_options=osm_options,
+        log_fn=active_log,
+    )
+
+    nodes = build_zip_nodes(
+        svi_csv=svi_csv_path,
+        zip_catalog_csv=zip_catalog_path,
+        state_name=str(state),
+        county_name=str(county),
+        svi_weight=svi_weight,
+        sleep_s=sleep_s,
+        use_centroid_if_missing=use_centroid_fallback,
+        cache_csv=cache_csv_path,
+        log_progress=log_progress,
+    )
+    route_df = find_route(
+        nodes=nodes,
+        num_places=num_places,
+        improve_2opt=improve_2opt,
+        use_clustering=use_clustering,
+        distance_provider=distance_provider,
+        parking_distance_provider=parking_distance_provider,
+        log_progress=log_progress,
+    )
+
+    if use_result_cache and cache_key:
+        save_route_result_cache(result_cache_dir, cache_key, route_df)
+        if log_progress:
+            active_log(f"[result_cache] STORED {cache_key[:12]}")
+
+    return route_df, _route_summary(route_df), False
+
+
 def create_app() -> "Flask":
     _require_flask()
     if load_dotenv is not None:
@@ -1302,80 +1484,6 @@ def create_app() -> "Flask":
             response.headers["Access-Control-Max-Age"] = "600"
         return response
 
-    def _log_progress(enabled: bool):
-        return (lambda msg: print(msg, flush=True)) if enabled else (lambda msg: None)
-
-    def _compute_route(payload: dict) -> Tuple[pd.DataFrame, dict]:
-        svi_csv = payload.get("svi_csv") or DEFAULT_SVI_CSV
-        zip_catalog_csv = payload.get("zip_catalog_csv") or DEFAULT_ZIP_CATALOG_CSV
-        zip_counts_csv = payload.get("zip_counts_csv") or DEFAULT_ZIP_COUNTS_CSV
-        state = payload.get("state")
-        county = payload.get("county")
-        num_places = payload.get("num_places")
-        if not state or not county or num_places is None:
-            raise ValueError("state, county, and num_places are required.")
-
-        svi_csv_path = _resolve_project_path(str(svi_csv)) if svi_csv else None
-        zip_catalog_path = _resolve_project_path(str(zip_catalog_csv))
-        zip_counts_path = _resolve_project_path(str(zip_counts_csv))
-        cache_csv_path = _resolve_project_path(payload.get("cache_csv"))
-
-        if not zip_catalog_path:
-            raise ValueError("zip_catalog_csv must be within the project directory.")
-        if zip_counts_path and not os.path.exists(zip_counts_path) and not os.path.exists(zip_catalog_path):
-            raise ValueError(f"zip_counts_csv not found: {zip_counts_csv}")
-
-        num_places = int(num_places)
-        svi_weight = float(payload.get("svi_weight", 1.0))
-        improve_2opt = _coerce_bool(payload.get("improve_2opt"), True)
-        use_clustering = _coerce_bool(payload.get("use_clustering"), False)
-        use_centroid_fallback = _coerce_bool(payload.get("use_centroid_fallback"), True)
-        sleep_s = float(payload.get("sleep_s", 0.0))
-        log_progress = _coerce_bool(payload.get("log_progress"), False)
-
-        osm_payload = payload.get("osm", {}) or {}
-        osm_options = OSMOptions(
-            network_type=str(osm_payload.get("network_type", "drive")),
-            buffer_km=float(osm_payload.get("buffer_km", DEFAULT_OSM_BUFFER_KM)),
-        )
-        log_fn = _log_progress(log_progress)
-
-        if not os.path.exists(zip_catalog_path):
-            ensure_zip_catalog(zip_catalog_path, zip_counts_csv=zip_counts_path or DEFAULT_ZIP_COUNTS_CSV, log_fn=log_fn)
-
-        distance_provider = build_distance_provider(
-            mode=str(payload.get("distance_mode", "osm")),
-            osm_options=osm_options,
-            log_fn=log_fn,
-        )
-        parking_distance_provider = build_distance_provider(
-            mode=str(payload.get("parking_distance_mode", "haversine")),
-            osm_options=osm_options,
-            log_fn=log_fn,
-        )
-
-        nodes = build_zip_nodes(
-            svi_csv=svi_csv_path,
-            zip_catalog_csv=zip_catalog_path,
-            state_name=str(state),
-            county_name=str(county),
-            svi_weight=svi_weight,
-            sleep_s=sleep_s,
-            use_centroid_if_missing=use_centroid_fallback,
-            cache_csv=cache_csv_path,
-            log_progress=log_progress,
-        )
-        route_df = find_route(
-            nodes=nodes,
-            num_places=num_places,
-            improve_2opt=improve_2opt,
-            use_clustering=use_clustering,
-            distance_provider=distance_provider,
-            parking_distance_provider=parking_distance_provider,
-            log_progress=log_progress,
-        )
-        return route_df, _route_summary(route_df)
-
     @app.get("/")
     def index():
         if render_template is None:
@@ -1396,9 +1504,11 @@ def create_app() -> "Flask":
     def api_route():
         payload = request.get_json(silent=True) or {}
         try:
-            route_df, summary = _compute_route(payload)
+            route_df, summary, cache_hit = compute_route_request(payload)
             records = route_df.to_dict(orient="records")
-            return jsonify({"summary": summary, "stops": records, "stats": summary, "route": records})
+            response = jsonify({"summary": summary, "stops": records, "stats": summary, "route": records, "cache_hit": cache_hit})
+            response.headers["X-Route-Cache"] = "HIT" if cache_hit else "MISS"
+            return response
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -1406,11 +1516,12 @@ def create_app() -> "Flask":
     def api_route_csv():
         payload = request.get_json(silent=True) or {}
         try:
-            route_df, summary = _compute_route(payload)
+            route_df, summary, cache_hit = compute_route_request(payload)
             csv_text = route_df.to_csv(index=False)
             filename = f"zip_route_{summary['num_stops']}_stops.csv"
             response = Response(csv_text, mimetype="text/csv")
             response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            response.headers["X-Route-Cache"] = "HIT" if cache_hit else "MISS"
             return response
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
@@ -1419,8 +1530,10 @@ def create_app() -> "Flask":
     def api_route_map():
         payload = request.get_json(silent=True) or {}
         try:
-            route_df, _ = _compute_route(payload)
-            return Response(build_route_map_html(route_df), mimetype="text/html")
+            route_df, _, cache_hit = compute_route_request(payload)
+            response = Response(build_route_map_html(route_df), mimetype="text/html")
+            response.headers["X-Route-Cache"] = "HIT" if cache_hit else "MISS"
+            return response
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -1428,8 +1541,10 @@ def create_app() -> "Flask":
     def api_route_preview():
         payload = request.get_json(silent=True) or {}
         try:
-            _, summary = _compute_route(payload)
-            return jsonify({"summary": summary, "stats": summary})
+            _, summary, cache_hit = compute_route_request(payload)
+            response = jsonify({"summary": summary, "stats": summary, "cache_hit": cache_hit})
+            response.headers["X-Route-Cache"] = "HIT" if cache_hit else "MISS"
+            return response
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -1470,6 +1585,13 @@ def main() -> None:
         help="Distance source for parking selection. Haversine is the pragmatic default.",
     )
     ap.add_argument("--cache_csv", type=str, default=None, help="Optional cache of per-ZIP parking lots")
+    ap.add_argument("--no_result_cache", action="store_true", help="Disable cached route-result reuse.")
+    ap.add_argument(
+        "--result_cache_dir",
+        type=str,
+        default=DEFAULT_RESULT_CACHE_DIR,
+        help="Directory for cached route results.",
+    )
     ap.add_argument("--out", type=str, default="route_output.csv")
     ap.add_argument("--html", type=str, default=None, help="Optional: write an interactive route map to this HTML file")
     args = ap.parse_args()
@@ -1480,44 +1602,39 @@ def main() -> None:
     def _log(msg: str) -> None:
         print(msg, flush=True)
 
-    if not os.path.exists(args.zip_catalog_csv):
-        ensure_zip_catalog(args.zip_catalog_csv, zip_counts_csv=args.zip_counts_csv, log_fn=_log if args.log_progress else None)
+    if args.log_progress:
+        print(f"[distance] Route mode: {args.distance_mode}", flush=True)
+        print(f"[parking_distance] Parking mode: {args.parking_distance_mode}", flush=True)
 
-    osm_options = OSMOptions(network_type="drive", buffer_km=DEFAULT_OSM_BUFFER_KM)
-    distance_provider = build_distance_provider(args.distance_mode, osm_options=osm_options, log_fn=_log)
-    parking_distance_provider = build_distance_provider(
-        args.parking_distance_mode,
-        osm_options=osm_options,
-        log_fn=_log,
+    route_df, _, cache_hit = compute_route_request(
+        {
+            "svi_csv": args.svi_csv,
+            "zip_catalog_csv": args.zip_catalog_csv,
+            "zip_counts_csv": args.zip_counts_csv,
+            "state": args.state,
+            "county": args.county,
+            "num_places": args.num_places,
+            "svi_weight": args.svi_weight,
+            "improve_2opt": not args.no_2opt,
+            "use_clustering": args.use_clustering,
+            "use_centroid_fallback": not args.no_centroid_fallback,
+            "sleep_s": args.sleep_s,
+            "log_progress": args.log_progress,
+            "distance_mode": args.distance_mode,
+            "parking_distance_mode": args.parking_distance_mode,
+            "cache_csv": args.cache_csv,
+            "use_result_cache": not args.no_result_cache,
+            "result_cache_dir": args.result_cache_dir,
+            "osm": {
+                "network_type": "drive",
+                "buffer_km": DEFAULT_OSM_BUFFER_KM,
+            },
+        },
+        log_fn=_log if args.log_progress else None,
     )
 
     if args.log_progress:
-        route_label = type(distance_provider).__name__.replace("DistanceProvider", "")
-        parking_label = type(parking_distance_provider).__name__.replace("DistanceProvider", "")
-        print(f"[distance] Route provider: {route_label}", flush=True)
-        print(f"[parking_distance] Parking provider: {parking_label}", flush=True)
-
-    nodes = build_zip_nodes(
-        svi_csv=args.svi_csv,
-        zip_catalog_csv=args.zip_catalog_csv,
-        state_name=args.state,
-        county_name=args.county,
-        svi_weight=args.svi_weight,
-        sleep_s=args.sleep_s,
-        use_centroid_if_missing=not args.no_centroid_fallback,
-        cache_csv=args.cache_csv,
-        log_progress=args.log_progress,
-    )
-
-    route_df = find_route(
-        nodes=nodes,
-        num_places=args.num_places,
-        improve_2opt=not args.no_2opt,
-        use_clustering=args.use_clustering,
-        distance_provider=distance_provider,
-        parking_distance_provider=parking_distance_provider,
-        log_progress=args.log_progress,
-    )
+        print(f"[result_cache] {'HIT' if cache_hit else 'MISS'}", flush=True)
 
     route_df.to_csv(args.out, index=False)
     print(route_df.to_string(index=False))
